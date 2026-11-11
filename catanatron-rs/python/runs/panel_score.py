@@ -15,10 +15,16 @@ PANEL = {b: os.path.abspath(f"runs/sp2-{b}/snap_000020.ctnn") for b in (1010194,
 GAMES, THREADS = 4000, 6
 
 
+def net_key(path):
+    """A snapshot's player key; with an opening network beside it (az.py --opening-net: osnap_N.ctnn), both."""
+    opath = os.path.join(os.path.dirname(path), "o" + os.path.basename(path))
+    return "NN:" + os.path.abspath(path) + (f"@{os.path.abspath(opath)}" if os.path.exists(opath) else "")
+
+
 def score(path):
     out = {}
     for board, spec in PANEL.items():
-        (w, _), _ = catanatron_rs.play_bots(["NN:" + os.path.abspath(path), "NN:" + spec], GAMES, 4242, THREADS,
+        (w, _), _ = catanatron_rs.play_bots([net_key(path), "NN:" + spec], GAMES, 4242, THREADS,
                                             map_type="BASE", board=f"seed:{board}", **OPENHEX_1V1)
         out[board] = 100.0 * w / GAMES
     return out

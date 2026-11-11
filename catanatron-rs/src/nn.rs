@@ -24,6 +24,7 @@
 //! bit-identical across the two.
 
 use std::io::Read;
+use std::sync::Arc;
 
 #[cfg(not(any(
     all(target_arch = "x86_64", target_feature = "f16c", target_feature = "fma"),
@@ -470,6 +471,17 @@ pub struct PolicyValueNet {
     policy: Layer,
     value: Layer,
     spots: Option<SpotBranch>,
+    /// A separate network for the initial placements (`Evaluator` uses it
+    /// while `is_initial_build_phase`); it may have its own input layout.
+    pub opening: Option<Arc<PolicyValueNet>>,
+}
+
+impl PolicyValueNet {
+    /// This network with `opening` attached for the initial placements.
+    pub fn with_opening(mut self, opening: Arc<PolicyValueNet>) -> Self {
+        self.opening = Some(opening);
+        self
+    }
 }
 
 /// Board structure (python/model.py `SpotBranch`): a shared tile encoder and
@@ -818,7 +830,7 @@ impl PolicyValueNet {
                 return Err("spot branch shapes don't match the trunk".into());
             }
         }
-        Ok(PolicyValueNet { obs_size, action_size, trunk, policy, value, spots })
+        Ok(PolicyValueNet { obs_size, action_size, trunk, policy, value, spots, opening: None })
     }
 
     /// Policy logits (unmasked) into `logits`; returns the value estimate.

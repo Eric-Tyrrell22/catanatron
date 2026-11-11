@@ -126,6 +126,8 @@ impl Player for VictoryPointPlayer {
 }
 
 /// Builds a bot from a CLI key: R, S, W, VP, F, AB / AB:<depth>,
+/// Any <model.ctnn> may be "main.ctnn@opening.ctnn": the opening network
+/// takes the initial placements (see `PolicyValueNet::opening`).
 /// NN:<model.ctnn> (network's top move), NNS:<model.ctnn> (move sampled
 /// from the network) or MCTS:<sims>[x<batch>][,c<c_puct>][,f<fpu>][,p<placement sims>][,m<margin weight>][,s<speed weight>/<turns>][,g<gumbel candidates>][,t<milliseconds per move>][,j<parallel searches>][,w<shared-tree threads>][,x<lock-free threads>][,d<chance widening alpha>][,r (keep the tree between moves)][,o<placements>/<K>x<N> (initial settlements by rollouts: best of the top K prior spots over N network-only games)][,k<prior mass kept below the root>][,q<value margin pruned below the root>]:<model.ctnn>
 /// (batch = leaves evaluated together per search round, default 1; c_puct

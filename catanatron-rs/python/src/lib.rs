@@ -467,7 +467,7 @@ fn net_forward<'py>(py: Python<'py>, path: &str, obs: &[u8]) -> PyResult<(Bound<
 #[pyfunction]
 #[pyo3(signature = (net, games, seed, threads=0, sims_full=200, sims_fast=32, p_full=0.25, sims_placement=0,
                     temp_moves=15, root_noise=0.25, dirichlet_alpha=0.3, c_puct=1.5, fpu_reduction=0.1,
-                    escalate_gap=0.0, entropy_budget=false, kl_escalate=false, admit_kl=0.0, focus_sims=0, endgame_vp=0, endgame_branches=0, opening_branches=0, placement_forks=0, placement_temp=1.0, placement_uniform=0.0, move_forks=0, move_fork_temp=1.0, move_fork_uniform=0.0, sibling_labels=false, pool_board_share=1.0, random_share=0.0, random_eps=1.0, scarce_ows_share=0.0, port_start_share=0.0, margin_weight=0.0, speed_weight=0.0, speed_turns=100.0, gumbel_m=0, pool=Vec::new(), pool_share=0.0, map_type="BASE", vps_to_win=10, discard_limit=7, friendly_robber="off", dice="fair", numbers="spiral", board=None))]
+                    escalate_gap=0.0, entropy_budget=false, kl_escalate=false, admit_kl=0.0, focus_sims=0, endgame_vp=0, endgame_branches=0, opening_branches=0, placement_forks=0, placement_temp=1.0, placement_uniform=0.0, move_forks=0, move_fork_temp=1.0, move_fork_uniform=0.0, sibling_labels=false, pool_board_share=1.0, random_share=0.0, random_eps=1.0, scarce_ows_share=0.0, port_start_share=0.0, margin_weight=0.0, speed_weight=0.0, speed_turns=100.0, gumbel_m=0, pool=Vec::new(), pool_share=0.0, opening_net=None, map_type="BASE", vps_to_win=10, discard_limit=7, friendly_robber="off", dice="fair", numbers="spiral", board=None))]
 #[allow(clippy::too_many_arguments)]
 fn self_play<'py>(
     py: Python<'py>,
@@ -510,6 +510,7 @@ fn self_play<'py>(
     gumbel_m: u32,
     pool: Vec<Vec<u8>>,
     pool_share: f32,
+    opening_net: Option<&[u8]>,
     map_type: &str,
     vps_to_win: u32,
     discard_limit: u32,
@@ -537,7 +538,12 @@ fn self_play<'py>(
         return Err(PyValueError::new_err("need margin_weight, speed_weight >= 0 and speed_turns > 0"));
     }
     let utility = catanatron::mcts::Utility { margin: margin_weight, speed: speed_weight, speed_turns };
-    let net = std::sync::Arc::new(catanatron::nn::PolicyValueNet::from_bytes(net).map_err(PyValueError::new_err)?);
+    let mut main = catanatron::nn::PolicyValueNet::from_bytes(net).map_err(PyValueError::new_err)?;
+    if let Some(o) = opening_net {
+        // A separate network for the initial placements (see PolicyValueNet::opening).
+        main = main.with_opening(std::sync::Arc::new(catanatron::nn::PolicyValueNet::from_bytes(o).map_err(PyValueError::new_err)?));
+    }
+    let net = std::sync::Arc::new(main);
     if !(0.0..=1.0).contains(&pool_share) {
         return Err(PyValueError::new_err("pool_share must be in [0, 1]"));
     }

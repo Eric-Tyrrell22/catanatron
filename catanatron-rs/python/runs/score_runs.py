@@ -14,6 +14,15 @@ ref_path, runs = sys.argv[1], sys.argv[2:]
 ref_name = os.path.basename(ref_path).split(".")[0]
 ref = "NN:" + os.path.abspath(ref_path)
 import re
+
+
+def net_key(path):
+    """A snapshot's player key; with an opening network beside it (az.py --opening-net: osnap_N.ctnn), both."""
+    opath = os.path.join(os.path.dirname(path), "o" + os.path.basename(path))
+    return "NN:" + os.path.abspath(path) + (f"@{os.path.abspath(opath)}" if os.path.exists(opath) else "")
+
+
+
 def already(run):
     """Snapshots already scored for this run (so a restarted scorer skips them)."""
     try:
@@ -30,7 +39,7 @@ while True:
         idle = False
         path = new[0]  # oldest unscored first, so every run advances
         time.sleep(3)
-        (w, _), _ = catanatron_rs.play_bots(["NN:" + os.path.abspath(path), ref], 10000, 70_000, 14, map_type="BASE", **OPENHEX_1V1)
+        (w, _), _ = catanatron_rs.play_bots([net_key(path), ref], 10000, 70_000, 14, map_type="BASE", **OPENHEX_1V1)
         line = f"{time.strftime('%H:%M')} {run} {os.path.basename(path)}: {w / 100:.1f}% vs {ref_name.capitalize()} (±0.5)"
         with open(f"runs/{run}.vs_{ref_name}", "a") as f:
             f.write(line + "\n")

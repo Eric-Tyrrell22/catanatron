@@ -37,13 +37,18 @@ struct NetCache {
 /// A network stays cached while some player uses it or it is among the last
 /// KEEP_LOADED loaded, so cycling through many snapshot files doesn't
 /// accumulate memory. Paths are assumed not to be rewritten with new weights.
+/// Loads a network by path, cached. "main.ctnn@opening.ctnn" loads the main
+/// network with an opening network attached for the initial placements.
 pub fn load_net(path: &str) -> Result<Arc<PolicyValueNet>, String> {
     static CACHE: OnceLock<Mutex<NetCache>> = OnceLock::new();
-    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
-    if let Some(net) = cache.by_path.get(path).and_then(Weak::upgrade) {
+    if let Some(net) = CACHE.get_or_init(Default::default).lock().unwrap().by_path.get(path).and_then(Weak::upgrade) {
         return Ok(net);
     }
-    let net = Arc::new(PolicyValueNet::load(path)?);
+    let net = match path.split_once('@') {
+        Some((main, opening)) => Arc::new(PolicyValueNet::load(main)?.with_opening(load_net(opening)?)),
+        None => Arc::new(PolicyValueNet::load(path)?),
+    };
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
     cache.recent.push_back(net.clone());
     if cache.recent.len() > KEEP_LOADED {
         cache.recent.pop_front();
@@ -73,9 +78,8 @@ fn priors_from(act_space: &ActionSpace, game: &Game, logits: &[f32]) -> Vec<f32>
     priors
 }
 
-/// Runs the network on positions: legal-move priors and a value for the
-/// player to move.
-pub(crate) struct Evaluator {
+/// One network's evaluation state: its observation layout and scratch buffers.
+struct NetEval {
     net: Arc<PolicyValueNet>,
     spaces: Option<(ObservationSpace, ActionSpace)>,
     obs_nz: Vec<(u32, f32)>,
@@ -85,12 +89,11 @@ pub(crate) struct Evaluator {
     batch_nz: Vec<Vec<(u32, f32)>>,
     batch_logits: Vec<Vec<f32>>,
     batch: BatchScratch,
-    evals: u64,
 }
 
-impl Evaluator {
-    pub(crate) fn new(net: Arc<PolicyValueNet>) -> Self {
-        Evaluator {
+impl NetEval {
+    fn new(net: Arc<PolicyValueNet>) -> Self {
+        NetEval {
             net,
             spaces: None,
             obs_nz: Vec::new(),
@@ -99,7 +102,6 @@ impl Evaluator {
             batch_nz: vec![Vec::new(); MAX_BATCH],
             batch_logits: vec![Vec::new(); MAX_BATCH],
             batch: BatchScratch::default(),
-            evals: 0,
         }
     }
 
@@ -112,33 +114,16 @@ impl Evaluator {
         spaces
     }
 
-    /// (softmax priors over `game.playable_actions`, value for the mover).
-    pub(crate) fn evaluate(&mut self, game: &Game) -> (Vec<f32>, f32) {
+    fn evaluate(&mut self, game: &Game) -> (Vec<f32>, f32) {
         self.spaces(game);
         let (obs_space, act_space) = self.spaces.as_ref().unwrap();
         let s = &game.state;
         let n = obs_space.encode_sparse_into(s, s.current_color(), &mut self.obs_nz);
         let value = self.net.forward_sparse(&self.obs_nz[..n], &mut self.scratch, &mut self.logits);
-        self.evals += 1;
         (priors_from(act_space, game, &self.logits), value)
     }
 
-    /// The network's observation of `game` from `me`'s seat (sparse).
-    fn observe(&mut self, game: &Game, me: Color) -> Vec<(u32, f32)> {
-        self.spaces(game);
-        let mut nz = Vec::new();
-        let n = self.spaces.as_ref().unwrap().0.encode_sparse_into(&game.state, me, &mut nz);
-        nz.truncate(n);
-        nz
-    }
-
-    /// Network evaluations so far.
-    pub(crate) fn evaluations(&self) -> u64 {
-        self.evals
-    }
-
-    /// `evaluate` for several positions, sharing network passes.
-    pub(crate) fn evaluate_batch(&mut self, games: &[&Game]) -> Vec<(Vec<f32>, f32)> {
+    fn evaluate_batch(&mut self, games: &[&Game]) -> Vec<(Vec<f32>, f32)> {
         self.spaces(games[0]);
         let (obs_space, act_space) = self.spaces.as_ref().unwrap();
         let mut out = Vec::with_capacity(games.len());
@@ -154,8 +139,75 @@ impl Evaluator {
                 out.push((priors_from(act_space, g, &self.batch_logits[b]), values[b]));
             }
         }
-        self.evals += games.len() as u64;
         out
+    }
+}
+
+/// Runs the network on positions: legal-move priors and a value for the
+/// player to move. With an opening network attached to the main one
+/// (`PolicyValueNet::opening`), initial placements are evaluated by it.
+pub(crate) struct Evaluator {
+    /// The main network (what parallel searches clone).
+    net: Arc<PolicyValueNet>,
+    main: NetEval,
+    opening: Option<NetEval>,
+    evals: u64,
+}
+
+impl Evaluator {
+    pub(crate) fn new(net: Arc<PolicyValueNet>) -> Self {
+        let opening = net.opening.clone().map(NetEval::new);
+        Evaluator { main: NetEval::new(net.clone()), opening, net, evals: 0 }
+    }
+
+    fn pick(&mut self, game: &Game) -> &mut NetEval {
+        match (&mut self.opening, game.state.is_initial_build_phase) {
+            (Some(o), true) => o,
+            _ => &mut self.main,
+        }
+    }
+
+    /// (softmax priors over `game.playable_actions`, value for the mover).
+    pub(crate) fn evaluate(&mut self, game: &Game) -> (Vec<f32>, f32) {
+        self.evals += 1;
+        self.pick(game).evaluate(game)
+    }
+
+    /// The main network's observation of `game` from `me`'s seat (sparse).
+    fn observe(&mut self, game: &Game, me: Color) -> Vec<(u32, f32)> {
+        self.main.spaces(game);
+        let mut nz = Vec::new();
+        let n = self.main.spaces.as_ref().unwrap().0.encode_sparse_into(&game.state, me, &mut nz);
+        nz.truncate(n);
+        nz
+    }
+
+    /// Network evaluations so far.
+    pub(crate) fn evaluations(&self) -> u64 {
+        self.evals
+    }
+
+    /// `evaluate` for several positions, sharing network passes; with an
+    /// opening network, each network takes its own positions.
+    pub(crate) fn evaluate_batch(&mut self, games: &[&Game]) -> Vec<(Vec<f32>, f32)> {
+        self.evals += games.len() as u64;
+        let Evaluator { main, opening, .. } = self;
+        let Some(open) = opening else { return main.evaluate_batch(games) };
+        if games.iter().all(|g| !g.state.is_initial_build_phase) {
+            return main.evaluate_batch(games);
+        }
+        let mut out: Vec<Option<(Vec<f32>, f32)>> = vec![None; games.len()];
+        for (placing, e) in [(false, main), (true, open)] {
+            let idx: Vec<usize> = (0..games.len()).filter(|&i| games[i].state.is_initial_build_phase == placing).collect();
+            if idx.is_empty() {
+                continue;
+            }
+            let sel: Vec<&Game> = idx.iter().map(|&i| games[i]).collect();
+            for (i, r) in idx.into_iter().zip(e.evaluate_batch(&sel)) {
+                out[i] = Some(r);
+            }
+        }
+        out.into_iter().map(|r| r.expect("every position evaluated")).collect()
     }
 }
 

@@ -92,7 +92,7 @@ def main():
         teachers = control.get("teachers", [])
         teacher = random.choice(teachers) if teachers and random.random() < control["teacher_share"] else None
         # Only networks still in use stay cached.
-        wanted = {control["model"], *control["pool"], *(t["key"] for t in teachers)}
+        wanted = {control["model"], *control["pool"], *(t["key"] for t in teachers), *([control["opening_model"]] if control.get("opening_model") else [])}
         for k in list(nets):
             if k not in wanted:
                 del nets[k]
@@ -100,10 +100,12 @@ def main():
         seed = int.from_bytes(os.urandom(8), "little") >> 1
         t0 = time.time()
         if teacher is None:
+            # An opening network (az.py --opening-net) takes the initial placements.
+            opening = net(control["opening_model"]) if control.get("opening_model") else None
             d = catanatron_rs.self_play(
                 net(control["model"]), games, seed, args.threads,
                 pool=[net(k) for k in control["pool"]], pool_share=control["pool_share"] if control["pool"] else 0.0,
-                **control["self_play"])
+                opening_net=opening, **control["self_play"])
         else:
             d = catanatron_rs.self_play(net(teacher["key"]), games, seed, args.threads,
                                         **{**control["self_play"], "board": teacher["board"]})

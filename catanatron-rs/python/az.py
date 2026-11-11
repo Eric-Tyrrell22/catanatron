@@ -11,6 +11,12 @@ search's value of the position (--value-q-weight). Every
 --eval-every iterations the network plays F without search, and with
 --eval-sims sims of search. The replay buffer is not saved: a resumed run
 refills it.
+
+With --opening-net a second network takes the initial placements: it starts
+as a copy of the main one, learns from the placement decisions only (its own
+replay and optimiser, omodel.pt / oreplay.pt), is exported next to each
+snapshot as osnap_*.ctnn (a player key "snap.ctnn@osnap.ctnn" uses both) and
+published to the remote actors as control["opening_model"].
 """
 
 import argparse
@@ -150,10 +156,17 @@ class Replay:
         return obs, mask, pi, z, aux, vw
 
 
-def evaluate(run_dir, model, iteration, args, board):
+def evaluate(run_dir, model, iteration, args, board, omodel=None):
     path = os.path.abspath(os.path.join(run_dir, f"snap_{iteration:06d}.ctnn"))
+    if omodel is not None:
+        # Written before the snapshot, so a scorer that sees the snapshot finds its opening network.
+        opath = os.path.abspath(os.path.join(run_dir, f"osnap_{iteration:06d}.ctnn"))
+        with open(opath, "wb") as f:
+            f.write(to_bytes(omodel, OBS, ACTIONS))
     with open(path, "wb") as f:
         f.write(to_bytes(model, OBS, ACTIONS))
+    if omodel is not None:
+        path = f"{path}@{opath}"
     out = {}
     # Search values finished games the way training does.
     utility = (f",m{args.margin_weight}" if args.margin_weight else "") + \
@@ -183,6 +196,7 @@ class Remote:
         self.max_shards = max_shards
         self.uploaded = set()  # snapshot keys already in the bucket
         self.model_key = None
+        self.opening_key = None
         # Teachers (board specialists) play a teacher_share of actor rounds on
         # their boards; their networks are uploaded once.
         self.teacher_share = teacher_share
@@ -193,9 +207,14 @@ class Remote:
                 self.s3.put_object(Bucket=bucket, Key=k, Body=f.read())
             self.teachers.append({"key": k, "board": t["board"]})
 
-    def publish(self, iteration, net, pool_paths, pool_share, self_play_kwargs):
+    def publish(self, iteration, net, pool_paths, pool_share, self_play_kwargs, opening=None):
+        """`opening`: the opening network's bytes (--opening-net), which the actors attach to `net`."""
         key = f"models/{self.run}/model_{iteration:06d}.ctnn"
         self.s3.put_object(Bucket=self.bucket, Key=key, Body=net)
+        okey = None
+        if opening is not None:
+            okey = f"models/{self.run}/opening_{iteration:06d}.ctnn"
+            self.s3.put_object(Bucket=self.bucket, Key=okey, Body=opening)
         pool = []
         for p in pool_paths:
             k = f"models/{self.run}/{os.path.basename(p)}"
@@ -207,11 +226,16 @@ class Remote:
         control = {"run": self.run, "iter": iteration, "model": key, "pool": pool, "pool_share": pool_share,
                    "games_per_core": self.games_per_core, "obs_size": OBS, "action_size": ACTIONS,
                    "self_play": self_play_kwargs, "teachers": self.teachers, "teacher_share": self.teacher_share}
+        if okey is not None:
+            control["opening_model"] = okey
         self.s3.put_object(Bucket=self.bucket, Key=self.control_key, Body=json.dumps(control).encode())
-        # Actors that are mid-round already hold the old network.
+        # Actors that are mid-round already hold the old networks.
         if self.model_key is not None and self.model_key != key:
             self.s3.delete_object(Bucket=self.bucket, Key=self.model_key)
         self.model_key = key
+        if self.opening_key is not None and self.opening_key != okey:
+            self.s3.delete_object(Bucket=self.bucket, Key=self.opening_key)
+        self.opening_key = okey
 
     def collect(self, iteration):
         """Downloads (and deletes) the newest max_shards shards of this run;
@@ -360,6 +384,18 @@ def main():
                          "(fresh input weights, zero output weights: same outputs to start)")
     ap.add_argument("--hidden", type=int, default=512, help="trunk width (a new run's --init network is grown to it)")
     ap.add_argument("--layers", type=int, default=2, help="trunk layers (likewise grown from --init)")
+    ap.add_argument("--opening-net", action="store_true",
+                    help="a separate network takes the initial placements: it starts as a copy of the main network, learns "
+                         "from the placement decisions only (own replay and optimiser; omodel.pt), is exported beside each "
+                         "snapshot as osnap_*.ctnn and plays the openings in local and remote self-play")
+    ap.add_argument("--opening-hidden", type=int, default=0, help="opening network's trunk width (0 = the main network's; grown from its copy)")
+    ap.add_argument("--opening-layers", type=int, default=0, help="opening network's trunk layers (0 = the main network's)")
+    ap.add_argument("--opening-lr", type=float, default=0.0, help="opening network's learning rate (0 = --lr)")
+    ap.add_argument("--opening-replay", type=int, default=50_000, help="opening replay capacity (placement decisions)")
+    ap.add_argument("--opening-batch", type=int, default=512)
+    ap.add_argument("--opening-reuse", type=float, default=8.0, help="opening training samples per new placement decision")
+    ap.add_argument("--opening-min-replay", type=int, default=2_000,
+                    help="placement decisions gathered before the opening network trains (it plays as the copy until then)")
     ap.add_argument("--batch", type=int, default=2048)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
@@ -527,6 +563,43 @@ def main():
             meta["revived"] = counts
             print(f"revived dead units per trunk layer {counts} (found on {probe_d['n']} positions; outputs unchanged)", flush=True)
 
+    # ---- The opening network (--opening-net): its own model, optimiser and checkpoint.
+    omodel, oopt, ometa, ockpt_path = None, None, None, os.path.join(run_dir, "omodel.pt")
+    if args.opening_net:
+        ohidden, olayers = args.opening_hidden or args.hidden, args.opening_layers or args.layers
+        ock = None
+        if args.resume and os.path.exists(ockpt_path):
+            ock = torch.load(ockpt_path, map_location=device)
+            ohidden, olayers = ock["meta"]["hidden"], ock["meta"]["layers"]
+        omodel = Policy(OBS, ACTIONS, hidden=ohidden, layers=olayers, aux=0, spots=spot_tables, extra_in=extra_in).to(device)
+        olr = args.opening_lr or args.lr
+        oextra = [p for n, p in omodel.named_parameters() if n.endswith("extra_weight")]
+        orest = [p for n, p in omodel.named_parameters() if not n.endswith("extra_weight")]
+        ogroups, ogroup_lrs = [{"params": orest, "lr": olr}], [olr]
+        if oextra:
+            ogroups.append({"params": oextra, "lr": olr * args.reach_lr_mult}); ogroup_lrs.append(olr * args.reach_lr_mult)
+        oopt = torch.optim.AdamW(ogroups, lr=olr, weight_decay=args.weight_decay)
+        if ock is not None:
+            omodel.load_state_dict(ock["model"])
+            oopt.load_state_dict(ock["opt"])
+            for g, lr in zip(oopt.param_groups, ogroup_lrs):
+                g["lr"] = lr
+            ometa = ock["meta"]
+            print(f"resumed the opening network ({olayers}x{ohidden}) at {ometa['steps']:,} steps", flush=True)
+        else:
+            # A copy of the main network as it is now (a resumed run without one
+            # gets a copy of its current network), so the openings start unchanged.
+            state = {k: v for k, v in model.state_dict().items() if not k.startswith("aux.")}
+            if trunk_shape(state) != (ohidden, olayers):
+                if spot_tables is not None or extra_in:
+                    raise SystemExit("the opening network can only be grown without the spot branch and --reach-lr-mult")
+                state = grow_state(state, omodel)
+            omodel.load_state_dict(state)
+            ometa = {"steps": 0, "examples": 0, "obs_size": OBS, "action_size": ACTIONS, "aux": 0, "hidden": ohidden,
+                     "layers": olayers, "spot_branch": spot_tables is not None, "extra_in": extra_in}
+            print(f"opening network: {olayers}x{ohidden}, a copy of the main network, lr {olr:g}, "
+                  f"trains from {args.opening_min_replay:,} placement decisions", flush=True)
+
     with open(os.path.join(run_dir, "args.json"), "w") as f:
         json.dump(vars(args), f, indent=2)
     log = open(os.path.join(run_dir, "log.jsonl"), "a")
@@ -535,6 +608,15 @@ def main():
     if args.resume and os.path.exists(replay_path):
         replay.load(replay_path)
         print(f"reloaded {replay.size:,} replay examples", flush=True)
+    oreplay, oreplay_path = None, os.path.join(run_dir, "oreplay.pt")
+    if omodel is not None:
+        oreplay = Replay(args.opening_replay, torch.device(args.replay_device or args.device), device)
+        if args.resume and os.path.exists(oreplay_path):
+            oreplay.load(oreplay_path)
+            print(f"reloaded {oreplay.size:,} opening replay examples", flush=True)
+
+    def opening_bytes():
+        return to_bytes(omodel, OBS, ACTIONS) if omodel is not None else None
     # SIGTERM/SIGINT: finish the current iteration, save, then stop.
     stop = {"requested": False}
     def request_stop(signum, frame):
@@ -593,7 +675,7 @@ def main():
     if args.remote_bucket:
         remote = Remote(args.remote_bucket, args.run, args.remote_games_per_core, args.remote_max_lag,
                         args.remote_max_shards, teachers, args.teacher_share, control_key=args.remote_control_key)
-        remote.publish(meta["iters"], to_bytes(model, OBS, ACTIONS), pool_paths(), args.pool_share, self_play_kwargs)
+        remote.publish(meta["iters"], to_bytes(model, OBS, ACTIONS), pool_paths(), args.pool_share, self_play_kwargs, opening_bytes())
         print(f"remote actors: publishing to s3://{args.remote_bucket}", flush=True)
 
     pool_cache = {}
@@ -619,7 +701,7 @@ def main():
                 self_play_kwargs["board"] = None
         d = catanatron_rs.self_play(
             to_bytes(model, OBS, ACTIONS), args.games, args.seed * 1_000_003 + meta["iters"], args.threads,
-            pool=pool, pool_share=args.pool_share if pool else 0.0, **self_play_kwargs)
+            pool=pool, pool_share=args.pool_share if pool else 0.0, opening_net=opening_bytes(), **self_play_kwargs)
         for seed_b, err in d["boards"]:
             hard_boards[int(seed_b)] = 0.5 * hard_boards.get(int(seed_b), err) + 0.5 * err
         # Fork pairs this iteration (local + remote): count, sum of (main - fork), sum of alt prob, per kind.
@@ -689,6 +771,14 @@ def main():
                    torch.from_numpy(value_target.astype(np.float32)),
                    torch.from_numpy(batch["surprise"]), torch.from_numpy(batch["aux"]),
                    torch.from_numpy(batch["opening"]), torch.from_numpy(batch["focus"]), torch.from_numpy(vw))
+        n_open = int(batch["opening"].sum())
+        if oreplay is not None and n_open:
+            # The placement decisions, each counting fully (the sibling labels already average their continuations).
+            o = batch["opening"]
+            sel = lambda a: torch.from_numpy(a[o])
+            oreplay.add(sel(batch["obs"]), sel(batch["mask"]), sel(batch["pi"]), sel(value_target.astype(np.float32)),
+                        sel(batch["surprise"]), sel(batch["aux"]), sel(batch["opening"]), sel(batch["focus"]),
+                        torch.ones(n_open))
         endgame_share = (float(np.frombuffer(d["endgame"], np.uint8).sum()) + shard_stats["endgame"]) / max(1, n_local + shard_stats["n"])
         luck = (d["luck_abs"] + shard_stats["luck_abs"]) / max(1, d["luck_events"] + shard_stats["luck_events"])
         games_seen = args.games + remote_games
@@ -725,6 +815,29 @@ def main():
                                       -(logp.exp() * logp.clamp(min=-1e4)).sum(-1).mean().detach(),
                                       -(pi * pi.clamp(min=1e-12).log()).sum(-1).mean()]))
         loss_pi, loss_v, loss_aux, loss_aux2, ent, target_ent = torch.stack(stats).mean(0).tolist()
+
+        # ---- The opening network learns from the placement decisions alone.
+        osteps, oloss_pi, oloss_v = 0, 0.0, 0.0
+        if omodel is not None and n_open and oreplay.size >= args.opening_min_replay:
+            osteps = max(1, round(n_open * args.opening_reuse / args.opening_batch))
+            ostats = []
+            omodel.train()
+            for _ in range(osteps):
+                obs, mask, pi, z, _, vw = oreplay.sample(args.opening_batch, sym)
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.bf16):
+                    logits, value = omodel(obs, mask)
+                logp = torch.log_softmax(logits, -1)
+                o_pi = -(pi * logp).sum(-1).mean()
+                o_v = ((value - z) ** 2 * vw).sum() / vw.sum().clamp(min=1.0)
+                oopt.zero_grad()
+                (o_pi + args.vf * o_v).backward()
+                torch.nn.utils.clip_grad_norm_(omodel.parameters(), 1.0)
+                oopt.step()
+                ostats.append(torch.stack([o_pi.detach(), o_v.detach()]))
+            oloss_pi, oloss_v = torch.stack(ostats).mean(0).tolist()
+            ometa["steps"] += osteps
+        if ometa is not None:
+            ometa["examples"] += n_open
         t_learn = time.time() - t1
 
         meta["iters"] += 1
@@ -734,6 +847,8 @@ def main():
             model.flat_value_scale.fill_(max(0.0, 1.0 - (meta["games"] - fade["start"]) / fade["games"]))
         meta["examples"] += n
         save(ckpt_path, model, opt, meta)
+        if omodel is not None:
+            save(ockpt_path, omodel, oopt, ometa)
 
         entry = {"iter": meta["iters"], "games": meta["games"], "examples": meta["examples"],
                  "minutes": (time.time() - start) / 60, "new_examples": n, "replay": replay.size,
@@ -745,13 +860,16 @@ def main():
                  "loss_pi": loss_pi, "loss_v": loss_v, "loss_aux": loss_aux, "loss_aux2": loss_aux2, "entropy": ent, "target_entropy": target_ent,
                  "fork_pairs": {k: {"n": c[0], "gap": c[1] / c[0], "alt_p": c[2] / c[0]} for k, c in fork_acc.items() if c[0]},
                  "train_steps": steps, "play_s": t_play, "learn_s": t_learn}
+        if omodel is not None:
+            entry["opening"] = {"new": n_open, "replay": oreplay.size, "steps": osteps, "total_steps": ometa["steps"],
+                                "loss_pi": oloss_pi, "loss_v": oloss_v}
         if remote is not None:
             entry.update({"remote_shards": len(remote_lag), "remote_games": remote_games, "teacher_shards": teacher_shards,
                           "remote_examples": n - n_local, "remote_dropped": remote_dropped,
                           "remote_lag": float(np.mean(remote_lag)) if remote_lag else None})
         if meta["iters"] % args.eval_every == 0:
             model.eval()
-            entry["vs_F"] = evaluate(run_dir, model, meta["iters"], args, board)
+            entry["vs_F"] = evaluate(run_dir, model, meta["iters"], args, board, omodel)
             r = entry["vs_F"]
             if self_play_kwargs["random_share"] > 0 and r.get("vsR") == 1.0 and r.get("vsR_capped") == 0.0:
                 self_play_kwargs["random_share"] = 0.0
@@ -760,7 +878,7 @@ def main():
                 print(f"beat the random bot in every evaluation game: random-opponent games off from iteration {meta['iters']}", flush=True)
         entry["random_share"] = self_play_kwargs["random_share"]
         if remote is not None:  # after the eval, so a new snapshot can join the pool
-            remote.publish(meta["iters"], to_bytes(model, OBS, ACTIONS), pool_paths(), args.pool_share, self_play_kwargs)
+            remote.publish(meta["iters"], to_bytes(model, OBS, ACTIONS), pool_paths(), args.pool_share, self_play_kwargs, opening_bytes())
         log.write(json.dumps(entry) + "\n")
         log.flush()
         ev = "  vs F " + " ".join(f"{k} {v:.1%}" for k, v in entry["vs_F"].items()) if "vs_F" in entry else ""
@@ -769,12 +887,16 @@ def main():
               + "".join(f"fork-{k} {c[1] / c[0]:+.3f}@{c[2] / c[0]:.2f} " for k, c in fork_acc.items() if c[0])
               + f"surp {mean_surprise:.2f} luck {luck:.3f} c {luck_c:.2f} esc {d['escalated'] + shard_stats['escalated']} br {d['branches'] + shard_stats['branches']} fk {d['forks'] + shard_stats['forks']} pool {d['pool_games'] + shard_stats['pool_games']} rnd {d['random_games']} end {endgame_share:.0%}  "
               f"play {t_play:.1f}s learn {t_learn:.2f}s{ev}"
+              + (f"  open {n_open} ex replay {oreplay.size:,} pi {oloss_pi:.3f} v {oloss_v:.3f} steps {osteps}" if omodel is not None else "")
               + (f"  remote {entry['remote_shards']} shards {entry['remote_examples']} ex "
                  f"lag {entry['remote_lag']} drop {remote_dropped}" if remote is not None else "")
               + (f" teacher {teacher_shards}" if teachers else ""), flush=True)
 
     replay.save(replay_path)
-    print(f"done: {meta['iters']} iterations, {meta['games']:,} games -> {ckpt_path} (replay {replay.size:,} saved)")
+    if oreplay is not None:
+        oreplay.save(oreplay_path)
+    print(f"done: {meta['iters']} iterations, {meta['games']:,} games -> {ckpt_path} (replay {replay.size:,} saved)"
+          + (f"; opening network {ometa['steps']:,} steps -> {ockpt_path}" if omodel is not None else ""))
 
 
 if __name__ == "__main__":
