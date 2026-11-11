@@ -28,11 +28,11 @@ class VecEnv:
     def __init__(self, num_envs, opponents, seed=0, threads=0, map_type="BASE",
                  vps_to_win=10, vp_reward=0.0, discard_limit=7, friendly_robber="off",
                  dice="fair", numbers="spiral", opponent_hands=False, opponent_devs=False, extra_info=False,
-                 spot_features=False, reach_features=False, structure_features=False):
+                 spot_features=False, reach_features=False, structure_features=False, relation_features=False):
         self._env = catanatron_rs.VecEnv(num_envs, list(opponents), seed, threads,
                                          map_type, vps_to_win, vp_reward, discard_limit,
                                          friendly_robber, dice, numbers, opponent_hands, opponent_devs,
-                                         extra_info, spot_features, reach_features, structure_features)
+                                         extra_info, spot_features, reach_features, structure_features, relation_features)
         self.num_envs = self._env.num_envs
         self.obs_size = self._env.obs_size
         self.action_size = self._env.action_size

@@ -297,6 +297,15 @@ pub struct MctsConfig {
     /// Simulations for initial placements (0 = `simulations`): few
     /// decisions that shape the whole game.
     pub placement_sims: u32,
+    /// At a settlement decision of the initial build phase, the share of the
+    /// root prior replaced by a uniform prior over the plausible spots, the
+    /// legal spots within `placement_flatten_margin` pips of the best one
+    /// (0 = off, 1 = the network's prior ignored at that root). The search
+    /// then compares the plausible spots by value instead of amplifying the
+    /// prior, so the visit target can move toward spots the prior underrates.
+    /// Applied before root noise; PUCT search only.
+    pub placement_flatten: f32,
+    pub placement_flatten_margin: f32,
     /// How finished games are valued beyond win/loss.
     pub utility: Utility,
     /// Gumbel root search (Danihelka et al. 2022) over this many candidate
@@ -380,7 +389,7 @@ impl Utility {
 
 impl Default for MctsConfig {
     fn default() -> Self {
-        MctsConfig { simulations: 200, rollout_openings: 0, rollout_k: 6, rollout_n: 100, c_puct: 1.5, fpu_reduction: 0.1, batch: 1, root_noise: 0.0, dirichlet_alpha: 0.3, placement_sims: 0, utility: Utility { margin: 0.0, speed: 0.0, speed_turns: 0.0 }, gumbel_m: 0, gumbel_noise: false, time_limit_ms: 0, root_threads: 0, tree_threads: 0, lockfree_threads: 0, chance_alpha: 0.0, chance_k: 1.0, tree_reuse: false, prune_mass: 1.0, q_prune_margin: 0.0 }
+        MctsConfig { simulations: 200, rollout_openings: 0, rollout_k: 6, rollout_n: 100, c_puct: 1.5, fpu_reduction: 0.1, batch: 1, root_noise: 0.0, dirichlet_alpha: 0.3, placement_sims: 0, placement_flatten: 0.0, placement_flatten_margin: 0.0, utility: Utility { margin: 0.0, speed: 0.0, speed_turns: 0.0 }, gumbel_m: 0, gumbel_noise: false, time_limit_ms: 0, root_threads: 0, tree_threads: 0, lockfree_threads: 0, chance_alpha: 0.0, chance_k: 1.0, tree_reuse: false, prune_mass: 1.0, q_prune_margin: 0.0 }
     }
 }
 
@@ -991,6 +1000,32 @@ impl MctsPlayer {
         }
     }
 
+    /// At a settlement decision of the initial build phase, mixes a uniform
+    /// prior over the plausible spots (within `placement_flatten_margin` pips
+    /// of the best legal spot) into the root's priors; see `placement_flatten`.
+    fn flatten_placement_root(&mut self, root: usize) {
+        let lam = self.config.placement_flatten;
+        let node = &mut self.nodes[root];
+        if lam <= 0.0 || !node.game.state.is_initial_build_phase {
+            return;
+        }
+        let map = &node.game.state.board.map;
+        let pips: Vec<Option<f32>> = node.edges.iter().map(|e| match e.action.kind {
+            ActionKind::BuildSettlement(n) => Some(map.node_production[n as usize].iter().sum::<f64>() as f32 * 36.0),
+            _ => None,
+        }).collect();
+        let best = pips.iter().flatten().fold(f32::MIN, |a, &b| a.max(b));
+        let plausible: Vec<bool> = pips.iter().map(|p| p.is_some_and(|p| p >= best - self.config.placement_flatten_margin)).collect();
+        let k = plausible.iter().filter(|&&p| p).count();
+        if k == 0 {
+            return; // not a settlement decision (a road)
+        }
+        let flat = 1.0 / k as f32;
+        for (e, &p) in node.edges.iter_mut().zip(&plausible) {
+            e.prior = (1.0 - lam) * e.prior + if p { lam * flat } else { 0.0 };
+        }
+    }
+
     /// Mixes Dirichlet noise into the root's priors.
     fn add_root_noise(&mut self, root: usize) {
         let n = self.nodes[root].edges.len();
@@ -1273,8 +1308,11 @@ impl MctsPlayer {
             };
             for (&id, (priors, value)) in ids.iter().zip(results) {
                 self.expand_with(id, priors, Some(value));
-                if id == root && self.config.root_noise > 0.0 {
-                    self.add_root_noise(root);
+                if id == root {
+                    self.flatten_placement_root(root);
+                    if self.config.root_noise > 0.0 {
+                        self.add_root_noise(root);
+                    }
                 }
             }
             for (path, leaf) in paths[..k].iter().zip(&leaves) {

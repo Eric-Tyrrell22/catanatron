@@ -324,8 +324,13 @@ pub struct ObservationSpace {
     spots: bool,
     /// Reach, contention and affordability (see `ObsFeatures::reach`).
     reach: bool,
-    /// Spot structure (see `ObsFeatures::structure`), last.
+    /// Spot structure (see `ObsFeatures::structure`).
     structure: bool,
+    /// Opening relations (see `ObsFeatures::relation`), last.
+    relation: bool,
+    /// The relation block's board-constant per-node entries (`RELATION_CONST`
+    /// per land node), computed once per map.
+    relation_const: Vec<f32>,
     num_land_nodes: usize,
     /// Land node => its port, if any (0..5 resources, 5 = 3:1). Fixed per map.
     node_port: Vec<Option<usize>>,
@@ -405,6 +410,157 @@ pub struct ObsFeatures {
     /// (/ 5), its 6s and 8s (/ 2), duplicated numbers (/ 2), tiles (/ 3) and
     /// whether it is coastal; then one constant marker.
     pub structure: bool,
+    /// Opening relations, per land node (`RELATION_PER_NODE`): what the
+    /// board specialists' replies and second settlements track
+    /// (runs/expert_features_report.md). Board-constant first: the best
+    /// two-settlement plan the spot can be part of (/ 12) and what a greedy
+    /// opponent leaves of it (/ 12, loss / 2), the plan's and the greedy
+    /// plan's resource cover (/ 5), pips x scarcity (/ 20), pips over distinct
+    /// numbers (/ 13), tile-pip variance (/ 6), distinct 5/6/8/9 (/ 3). Then,
+    /// during the initial build phase only (zero otherwise), relative to the
+    /// observer: how much the spot damages the opponents' best plan (/ 1.5),
+    /// two roads from an opponent, nearness (/ 5), blocking an opponent's
+    /// initial road, tiles shared with opponents (/ 2), pips in resources the
+    /// opponents lack as board shares, the best adjacent open spot (/ 15),
+    /// the spot's pip rank among open spots within two roads (/ 8), and the
+    /// plan with the observer's own settlements: score (/ 12), cover (/ 5),
+    /// pips in resources the observer lacks (/ 10). Then constant markers.
+    pub relation: bool,
+}
+
+/// Board-constant entries per land node of the relation block.
+pub const RELATION_CONST: usize = 9;
+/// State-dependent entries per land node of the relation block.
+pub const RELATION_STATE: usize = 11;
+pub const RELATION_PER_NODE: usize = RELATION_CONST + RELATION_STATE;
+/// Constant markers closing the block, so its size coincides with no other
+/// combination of blocks on any map (the other blocks' sizes are dense; the
+/// first count that works is 74, see examples/layout_sizes.rs).
+const RELATION_MARKERS: usize = 74;
+
+fn relation_len(num_land_nodes: usize) -> usize {
+    num_land_nodes * RELATION_PER_NODE + RELATION_MARKERS
+}
+
+/// Start of the relation block, if present.
+pub fn relation_offset_of(obs: &ObservationSpace) -> Option<usize> {
+    obs.relation.then(|| obs.size - relation_len(obs.num_land_nodes))
+}
+
+/// Pips of a land node by resource (wood, brick, sheep, wheat, ore).
+fn node_pips(map: &CatanMap, nd: usize) -> [f32; 5] {
+    let mut p = [0.0f32; 5];
+    for (r, x) in map.node_production[nd].iter().enumerate() {
+        p[r] = (*x * 36.0) as f32;
+    }
+    p
+}
+
+/// Land nodes adjacent to `nd` by a land edge.
+fn land_neighbours(map: &CatanMap, nd: usize, num_land_nodes: usize) -> impl Iterator<Item = usize> + '_ {
+    map.node_edges[nd].iter().filter(move |&&(m, e)| (m as usize) < num_land_nodes && map.land_edge[e]).map(|&(m, _)| m as usize)
+}
+
+/// Two-settlement plan score of spots `a` and `b`: sum over resources of the
+/// square root of their combined pips (diminishing returns per resource).
+fn plan_score(pa: &[f32; 5], pb: &[f32; 5]) -> f32 {
+    (0..5).map(|r| (pa[r] + pb[r]).sqrt()).sum()
+}
+
+fn cover(pa: &[f32; 5], pb: &[f32; 5]) -> f32 {
+    (0..5).filter(|&r| pa[r] + pb[r] > 0.0).count() as f32
+}
+
+/// The relation block's board-constant per-node entries, `RELATION_CONST` each.
+fn relation_constants(map: &CatanMap, num_land_nodes: usize) -> Vec<f32> {
+    let pips_of = |num: u8| (6 - (7 - num as i32).abs()).max(0) as f32;
+    let pips: Vec<[f32; 5]> = (0..num_land_nodes).map(|nd| node_pips(map, nd)).collect();
+    let total: Vec<f32> = pips.iter().map(|p| p.iter().sum()).collect();
+    let mut board = [0.0f32; 5];
+    for p in &pips {
+        for r in 0..5 {
+            board[r] += p[r];
+        }
+    }
+    // Each node's production counts once per tile, so divide by the nodes per tile (6) to get the board's pips.
+    for b in board.iter_mut() {
+        *b /= 6.0;
+    }
+    let adjacent: Vec<Vec<usize>> = (0..num_land_nodes).map(|nd| land_neighbours(map, nd, num_land_nodes).collect()).collect();
+    let mut out = Vec::with_capacity(num_land_nodes * RELATION_CONST);
+    for nd in 0..num_land_nodes {
+        let mut blocked = vec![false; num_land_nodes];
+        blocked[nd] = true;
+        for &m in &adjacent[nd] {
+            blocked[m] = true;
+        }
+        let best_partner = |blocked: &[bool]| -> (f32, f32) {
+            let mut best = (0.0f32, 0.0f32);
+            for k in 0..num_land_nodes {
+                if !blocked[k] {
+                    let s = plan_score(&pips[nd], &pips[k]);
+                    if s > best.0 {
+                        best = (s, cover(&pips[nd], &pips[k]));
+                    }
+                }
+            }
+            best
+        };
+        let (plan, plan_cover) = best_partner(&blocked);
+        // A greedy opponent takes the two pips-best remaining spots (and blocks
+        // their neighbours); spots tied for best are averaged over, so the
+        // feature does not depend on node numbering (board symmetries).
+        let tied_best = |blocked: &[bool]| -> Vec<usize> {
+            let top = (0..num_land_nodes).filter(|&k| !blocked[k]).map(|k| total[k]).fold(f32::MIN, f32::max);
+            (0..num_land_nodes).filter(|&k| !blocked[k] && total[k] == top).collect()
+        };
+        let take = |blocked: &mut Vec<bool>, k: usize| {
+            blocked[k] = true;
+            for &m in &adjacent[k] {
+                blocked[m] = true;
+            }
+        };
+        let (mut greedy, mut greedy_cover, mut branches) = (0.0f32, 0.0f32, 0usize);
+        for t1 in tied_best(&blocked) {
+            let mut b1 = blocked.clone();
+            take(&mut b1, t1);
+            let seconds = tied_best(&b1);
+            if seconds.is_empty() {
+                let (sc, cv) = best_partner(&b1);
+                greedy += sc; greedy_cover += cv; branches += 1;
+                continue;
+            }
+            for t2 in seconds {
+                let mut b2 = b1.clone();
+                take(&mut b2, t2);
+                let (sc, cv) = best_partner(&b2);
+                greedy += sc; greedy_cover += cv; branches += 1;
+            }
+        }
+        if branches > 0 {
+            greedy /= branches as f32;
+            greedy_cover /= branches as f32;
+        }
+        let scarce: f32 = (0..5).map(|r| pips[nd][r] / board[r].max(1.0)).sum();
+        let mut nums: Vec<u8> = Vec::new();
+        let mut tile_pips: Vec<f32> = Vec::new();
+        for &ti in &map.adjacent_tiles[nd] {
+            if let (Some(_), Some(num)) = (map.tiles[ti].resource(), map.tiles[ti].number()) {
+                nums.push(num);
+                tile_pips.push(pips_of(num));
+            }
+        }
+        let mut distinct = nums.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let hit: f32 = distinct.iter().map(|&k| pips_of(k)).sum();
+        let mean = if tile_pips.is_empty() { 0.0 } else { tile_pips.iter().sum::<f32>() / tile_pips.len() as f32 };
+        let var = if tile_pips.is_empty() { 0.0 } else { tile_pips.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / tile_pips.len() as f32 };
+        let cov5689 = distinct.iter().filter(|&&k| matches!(k, 5 | 6 | 8 | 9)).count() as f32;
+        out.extend_from_slice(&[plan / 12.0, greedy / 12.0, (plan - greedy) / 2.0, plan_cover / 5.0, greedy_cover / 5.0,
+                                total[nd] * scarce / 20.0, hit / 13.0, var / 6.0, cov5689 / 3.0]);
+    }
+    out
 }
 
 /// Per land node entries of the structure block.
@@ -423,7 +579,7 @@ fn struct_len(num_land_nodes: usize) -> usize {
 
 /// Start of the structure block, if present.
 pub fn struct_offset_of(obs: &ObservationSpace) -> Option<usize> {
-    obs.structure.then(|| obs.size - struct_len(obs.num_land_nodes))
+    obs.structure.then(|| obs.size - struct_len(obs.num_land_nodes) - obs.relation_size())
 }
 
 /// Per land node entries of the reach block.
@@ -441,12 +597,12 @@ fn reach_len(num_land_nodes: usize) -> usize {
 
 /// Start of the reach block, if present.
 pub fn reach_offset_of(obs: &ObservationSpace) -> Option<usize> {
-    obs.reach.then(|| obs.size - reach_len(obs.num_land_nodes) - if obs.structure { struct_len(obs.num_land_nodes) } else { 0 })
+    obs.reach.then(|| obs.size - reach_len(obs.num_land_nodes) - obs.struct_size() - obs.relation_size())
 }
 
 impl ObsFeatures {
     pub const ALL: ObsFeatures =
-        ObsFeatures { dice: true, dice_history: true, hands: true, devs: true, extras: true, spots: true, reach: true, structure: true };
+        ObsFeatures { dice: true, dice_history: true, hands: true, devs: true, extras: true, spots: true, reach: true, structure: true, relation: true };
 }
 
 /// Per land node entries of the spots block.
@@ -523,7 +679,7 @@ impl ObservationSpace {
     /// layout plus whichever optional blocks account for the extra inputs.
     pub fn for_network(map: &CatanMap, obs_size: usize) -> ObservationSpace {
         for k in 0..32 {
-            for k2 in 0..8 {
+            for k2 in 0..16 {
                 let f = ObsFeatures {
                     dice: k & 1 != 0,
                     hands: k & 2 != 0,
@@ -533,6 +689,7 @@ impl ObservationSpace {
                     spots: k2 & 1 != 0,
                     reach: k2 & 2 != 0,
                     structure: k2 & 4 != 0,
+                    relation: k2 & 8 != 0,
                 };
                 if f.dice_history && !f.dice {
                     continue;
@@ -552,12 +709,12 @@ impl ObservationSpace {
 
     /// Start of the extras block, if present.
     pub fn extras_offset(&self, map: &CatanMap) -> Option<usize> {
-        self.extras.then(|| self.size - extras_len(map) - self.spots_size() - self.reach_size() - self.struct_size())
+        self.extras.then(|| self.size - extras_len(map) - self.spots_size() - self.reach_size() - self.struct_size() - self.relation_size())
     }
 
     /// Start of the spots block, if present (its per-node part first).
     pub fn spots_offset(&self) -> Option<usize> {
-        self.spots.then(|| self.size - self.spots_size() - self.reach_size() - self.struct_size())
+        self.spots.then(|| self.size - self.spots_size() - self.reach_size() - self.struct_size() - self.relation_size())
     }
 
     fn reach_size(&self) -> usize {
@@ -568,12 +725,16 @@ impl ObservationSpace {
         if self.structure { struct_len(self.num_land_nodes) } else { 0 }
     }
 
+    fn relation_size(&self) -> usize {
+        if self.relation { relation_len(self.num_land_nodes) } else { 0 }
+    }
+
     fn spots_size(&self) -> usize {
         if self.spots { spots_len(self.num_land_nodes) } else { 0 }
     }
 
     pub fn with_features(map: &CatanMap, f: ObsFeatures) -> ObservationSpace {
-        let ObsFeatures { dice, dice_history, hands, devs, extras, spots, reach, structure } = f;
+        let ObsFeatures { dice, dice_history, hands, devs, extras, spots, reach, structure, relation } = f;
         assert!(dice || !dice_history, "the dice-history block comes with the dice block");
         let num_land_nodes = map.land_nodes.iter().filter(|&&x| x).count();
         let land_edges: Vec<usize> = (0..map.edges.len()).filter(|&i| map.land_edge[i]).collect();
@@ -600,8 +761,10 @@ impl ObservationSpace {
             + if extras { extras_len(map) } else { 0 }
             + if spots { spots_len(num_land_nodes) } else { 0 }
             + if reach { reach_len(num_land_nodes) } else { 0 }
-            + if structure { struct_len(num_land_nodes) } else { 0 };
-        ObservationSpace { dice, dice_history, hands, devs, extras, spots, reach, structure, num_land_nodes, node_port, land_edges, size }
+            + if structure { struct_len(num_land_nodes) } else { 0 }
+            + if relation { relation_len(num_land_nodes) } else { 0 };
+        let relation_const = if relation { relation_constants(map, num_land_nodes) } else { Vec::new() };
+        ObservationSpace { dice, dice_history, hands, devs, extras, spots, reach, structure, relation, relation_const, num_land_nodes, node_port, land_edges, size }
     }
 
     pub fn len(&self) -> usize {
@@ -643,6 +806,134 @@ impl ObservationSpace {
     }
 
     /// Single definition of the layout, used both for values and names.
+    /// The opening-relation block (see `ObsFeatures::relation`): the cached
+    /// board constants per land node, then the state-dependent entries, which
+    /// are zero outside the initial build phase.
+    fn write_relation<W: Sink>(&self, s: &State, me: Color, w: &mut W) {
+        let b = &s.board;
+        let map = &b.map;
+        let n_land = self.num_land_nodes;
+        let opening = s.is_initial_build_phase;
+        if !opening {
+            // Outside the opening only the cached constants and zeros: no per-call work.
+            for nd in 0..n_land {
+                for j in 0..RELATION_CONST {
+                    w.put(|| format!("REL{nd}_CONST{j}"), self.relation_const[nd * RELATION_CONST + j]);
+                }
+                for j in 0..RELATION_STATE {
+                    w.put(|| format!("REL{nd}_STATE{j}"), 0.0);
+                }
+            }
+            for k in 0..RELATION_MARKERS {
+                w.put(|| format!("RELATION_BLOCK_{k}"), 1.0);
+            }
+            return;
+        }
+        let pips: Vec<[f32; 5]> = (0..n_land).map(|nd| node_pips(map, nd)).collect();
+        let total: Vec<f32> = pips.iter().map(|p| p.iter().sum()).collect();
+        let open = |k: usize| b.buildable[k] && b.buildings[k].is_none();
+        // Settlements by side, their pips, and the opponents' best two-settlement plans.
+        let mut own = [0.0f32; 5];
+        let mut opp_pips = [0.0f32; 5];
+        let mut opp_nodes: Vec<usize> = Vec::new();
+        let mut has_opp = false;
+        for nd in 0..n_land {
+            if let Some((c, _)) = b.buildings[nd] {
+                let side = if c == me { &mut own } else { has_opp = true; opp_nodes.push(nd); &mut opp_pips };
+                for r in 0..5 {
+                    side[r] += pips[nd][r];
+                }
+            }
+        }
+        // For each opponent settlement, its partner spots by plan score, best first.
+        let mut partners: Vec<Vec<(f32, usize)>> = Vec::new();
+        let mut best_plan = 0.0f32;
+        for &sn in &opp_nodes {
+            let near: Vec<usize> = land_neighbours(map, sn, n_land).collect();
+            let mut list: Vec<(f32, usize)> =
+                (0..n_land).filter(|&k| k != sn && open(k) && !near.contains(&k)).map(|k| (plan_score(&pips[sn], &pips[k]), k)).collect();
+            list.sort_by(|a, b| b.0.total_cmp(&a.0));
+            if let Some(&(sc, _)) = list.first() {
+                best_plan = best_plan.max(sc);
+            }
+            partners.push(list);
+        }
+        // Road distance from the opponents' settlements (multi-source BFS over land edges).
+        let mut dist = vec![u8::MAX; n_land];
+        let mut queue: std::collections::VecDeque<usize> = opp_nodes.iter().copied().collect();
+        for &sn in &opp_nodes {
+            dist[sn] = 0;
+        }
+        while let Some(u) = queue.pop_front() {
+            for v in land_neighbours(map, u, n_land) {
+                if dist[v] == u8::MAX {
+                    dist[v] = dist[u] + 1;
+                    queue.push_back(v);
+                }
+            }
+        }
+        // Far ends of the opponents' initial roads (the endpoint without their building).
+        let mut road_far = vec![false; n_land];
+        for (ei, c) in b.roads.iter().enumerate().take(map.edges.len()) {
+            if let Some(c) = c {
+                if *c != me {
+                    let (u, v) = map.edges[ei];
+                    for (end, other) in [(u as usize, v as usize), (v as usize, u as usize)] {
+                        if end < n_land && b.buildings[other].map_or(true, |(bc, _)| bc == me) && b.buildings[end].is_none() {
+                            road_far[end] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let opp_tiles: Vec<usize> = opp_nodes.iter().flat_map(|&sn| map.adjacent_tiles[sn].iter().copied()).collect();
+        let mut board = [0.0f32; 5];
+        for p in &pips {
+            for r in 0..5 {
+                board[r] += p[r] / 6.0;
+            }
+        }
+        for nd in 0..n_land {
+            for j in 0..RELATION_CONST {
+                w.put(|| format!("REL{nd}_CONST{j}"), self.relation_const[nd * RELATION_CONST + j]);
+            }
+            let near: Vec<usize> = land_neighbours(map, nd, n_land).collect();
+            // The opponents' best plan once this spot and its neighbours are taken.
+            let mut after = 0.0f32;
+            for list in &partners {
+                if let Some(&(sc, _)) = list.iter().find(|&&(_, k)| k != nd && !near.contains(&k)) {
+                    after = after.max(sc);
+                }
+            }
+            w.put(|| format!("REL{nd}_OPP_HURT"), (best_plan - after).max(0.0) / 1.5);
+            w.put(|| format!("REL{nd}_OPP_D2"), (dist[nd] == 2) as u8 as f32);
+            w.put(|| format!("REL{nd}_OPP_NEAR"), if dist[nd] == u8::MAX { 0.0 } else { (5.0 - dist[nd] as f32).max(0.0) / 5.0 });
+            w.put(|| format!("REL{nd}_OPP_BLOCK_ROAD"), (road_far[nd] || near.iter().any(|&m| road_far[m])) as u8 as f32);
+            let shared = map.adjacent_tiles[nd].iter().filter(|t| opp_tiles.contains(t)).count();
+            w.put(|| format!("REL{nd}_OPP_SHARED_TILES"), shared as f32 / 2.0);
+            let deny: f32 = if has_opp { (0..5).filter(|&r| opp_pips[r] == 0.0).map(|r| pips[nd][r] / board[r].max(1.0)).sum() } else { 0.0 };
+            w.put(|| format!("REL{nd}_OPP_DENY"), deny);
+            let adj_max = near.iter().filter(|&&m| open(m)).map(|&m| total[m]).fold(0.0, f32::max);
+            w.put(|| format!("REL{nd}_ADJ_MAX"), adj_max / 15.0);
+            // Dense rank of the spot's pips among open spots within two roads (0 = best).
+            let mut within: Vec<usize> = near.clone();
+            for &m in &near {
+                within.extend(land_neighbours(map, m, n_land));
+            }
+            let mut higher: Vec<u32> = within.iter().filter(|&&m| m != nd && open(m) && total[m] > total[nd]).map(|&m| total[m] as u32).collect();
+            higher.sort_unstable();
+            higher.dedup();
+            w.put(|| format!("REL{nd}_LOCAL_RANK"), higher.len() as f32 / 8.0);
+            w.put(|| format!("REL{nd}_OWN_SCORE"), plan_score(&own, &pips[nd]) / 12.0);
+            w.put(|| format!("REL{nd}_OWN_COVER"), cover(&own, &pips[nd]) / 5.0);
+            let compl: f32 = (0..5).filter(|&r| own[r] == 0.0).map(|r| pips[nd][r]).sum();
+            w.put(|| format!("REL{nd}_OWN_COMPL"), compl / 10.0);
+        }
+        for k in 0..RELATION_MARKERS {
+            w.put(|| format!("RELATION_BLOCK_{k}"), 1.0);
+        }
+    }
+
     fn write<W: Sink>(&self, s: &State, me: Color, w: &mut W) {
         let b = &s.board;
         let map = &b.map;
@@ -1020,6 +1311,10 @@ impl ObservationSpace {
             }
         }
 
+        if self.relation {
+            self.write_relation(s, me, w);
+        }
+
         w.finish(self.size);
     }
 }
@@ -1237,6 +1532,14 @@ pub fn symmetries(map: &CatanMap, obs: &ObservationSpace, act: &ActionSpace) -> 
                 for (n, &m) in node.iter().enumerate() {
                     for j in 0..STRUCT_PER_NODE {
                         o[base + m * STRUCT_PER_NODE + j] = base + n * STRUCT_PER_NODE + j;
+                    }
+                }
+            }
+            if let Some(o_q) = relation_offset_of(obs) {
+                // All per-node entries move with the nodes; the markers are symmetric.
+                for (n, &m) in node.iter().enumerate() {
+                    for j in 0..RELATION_PER_NODE {
+                        o[o_q + m * RELATION_PER_NODE + j] = o_q + n * RELATION_PER_NODE + j;
                     }
                 }
             }

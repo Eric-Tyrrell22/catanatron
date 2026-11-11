@@ -354,6 +354,10 @@ def main():
     ap.add_argument("--placement-margin", type=float, default=0.0,
                     help="a settlement fork's alternative is drawn uniformly from the legal spots within this many pips of the best "
                          "(the plausible ones) instead of from the flattened search target (0 = off)")
+    ap.add_argument("--placement-flatten", type=float, default=0.0,
+                    help="at settlement decisions of the initial build phase, replace this share of the search's root prior with a "
+                         "uniform prior over the plausible spots (within --placement-margin pips of the best), so search compares them "
+                         "by value instead of amplifying the prior (0 = off, 1 = prior ignored at that root)")
     ap.add_argument("--regret-forks", action="store_true",
                     help="with --fork-settlements-only: weight the choice of which settlement decision a placement fork replays by "
                          "the running mean regret of its forks (how much alternatives beat the network's pick), so forks go where "
@@ -448,6 +452,11 @@ def main():
                     help="network sees the board's pips per resource and, per spot, its share of each resource's supply, "
                          "its road/city/settlement resource pairs, 6s and 8s, duplicate numbers, tile count and coast "
                          "(what the board specialists' first picks track; board-constant)")
+    ap.add_argument("--relation-features", action="store_true",
+                    help="network sees per spot its two-settlement plan and what a greedy opponent leaves of it, pips x scarcity, "
+                         "number spread (board-constant) and, in the initial build phase, its relation to the opponents' settlements "
+                         "(plan damage, distance, road block, shared tiles, denied resources, local rank) and to its own "
+                         "(plan score, cover, complement): what the board specialists' replies and second settlements track")
     ap.add_argument("--opening-init", default=None,
                     help="with --opening-net: start the opening network from this omodel.pt (inputs widened with zero weights "
                          "for new feature blocks) instead of from a copy of the main network")
@@ -473,14 +482,14 @@ def main():
 
     probe = VecEnv(1, ["R"], opponent_hands=args.opponent_hands, opponent_devs=args.opponent_devs,
                    extra_info=args.extra_info, spot_features=args.spot_features, reach_features=args.reach_features,
-                   structure_features=args.structure_features, **rules_from_args(args))
+                   structure_features=args.structure_features, relation_features=args.relation_features, **rules_from_args(args))
     OBS, ACTIONS = probe.obs_size, probe.action_size
     extra_in = 0
     if args.reach_lr_mult > 0:
         if not args.reach_features:
             raise SystemExit("--reach-lr-mult needs --reach-features")
-        if args.structure_features:
-            raise SystemExit("--reach-lr-mult routes the trailing inputs; the structure block comes after the reach block")
+        if args.structure_features or args.relation_features:
+            raise SystemExit("--reach-lr-mult routes the trailing inputs; the structure and relation blocks come after the reach block")
         extra_in = OBS - VecEnv(1, ["R"], opponent_hands=args.opponent_hands, opponent_devs=args.opponent_devs,
                                 extra_info=args.extra_info, spot_features=args.spot_features, **rules_from_args(args)).obs_size
     torch.manual_seed(args.seed)
@@ -685,7 +694,7 @@ def main():
         temp_moves=args.temp_moves, root_noise=args.root_noise, dirichlet_alpha=args.alpha, c_puct=args.c_puct,
         fpu_reduction=args.fpu, escalate_gap=args.escalate_gap, entropy_budget=args.entropy_budget, kl_escalate=args.kl_escalate, admit_kl=args.admit_kl, focus_sims=args.focus_sims, endgame_vp=args.endgame_vp,
         endgame_branches=args.endgame_branches, opening_branches=args.opening_branches,
-        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, fork_settlements_only=args.fork_settlements_only, placement_margin=args.placement_margin, placement_fork_weights=list(meta.get("fork_weights_init", [1.0, 1.0, 1.0, 1.0])), move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
+        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, fork_settlements_only=args.fork_settlements_only, placement_margin=args.placement_margin, placement_flatten=args.placement_flatten, placement_fork_weights=list(meta.get("fork_weights_init", [1.0, 1.0, 1.0, 1.0])), move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
         speed_weight=args.speed_weight, speed_turns=args.speed_turns, board=board, **rules_from_args(args))
     # Random-opponent games stop for good once search beats the random bot in
     # every evaluation game with none capped (recorded in meta, so a resumed

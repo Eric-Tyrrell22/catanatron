@@ -131,6 +131,9 @@ pub struct SelfPlayConfig {
     /// legal spot (the plausible ones) instead of from the flattened search
     /// target. Such forks, like uniform ones, are not sibling labels.
     pub placement_margin: f32,
+    /// Root-prior flattening at settlement decisions (`MctsConfig::placement_flatten`),
+    /// over the spots within `placement_margin` pips of the best (0 = off).
+    pub placement_flatten: f32,
     /// With `fork_settlements_only`: relative weight of each settlement decision
     /// (0..3 in placement order) for choosing which one a placement fork replays
     /// (all 1 = cycle through them; the learner sets these from the forks'
@@ -625,6 +628,8 @@ fn play_game(
         utility: cfg.utility,
         gumbel_m: cfg.gumbel_m,
         gumbel_noise: cfg.gumbel_m > 0,
+        placement_flatten: cfg.placement_flatten,
+        placement_flatten_margin: cfg.placement_margin,
         ..Default::default()
     };
     // Indexed by `Color::idx` (seat order is shuffled per game).
