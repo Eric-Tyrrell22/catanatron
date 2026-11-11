@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledger</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 12px 16px; background: #fafafa; color: #222; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .nav { font-size: 14px; margin: 0 0 6px; } .nav a { color: #1f5fa8; }
+  .muted { color: #888; } .err { background: #fdecea; border: 1px solid #f5c2bd; color: #8a1c12; padding: 8px 12px; border-radius: 4px; }
+  details.rules { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 6px 10px; margin: 8px 0 12px; }
+  details.rules dt { font-weight: 600; margin-top: 6px; } details.rules dd { margin: 0 0 0 12px; }
+  .board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
+  .lane { background: #eef0f3; border-radius: 6px; padding: 8px; }
+  .lane h2 { font-size: 15px; margin: 0 0 8px; } .lane h2 span { color: #666; font-weight: normal; }
+  .card { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
+  .card h3 { font-size: 14px; margin: 0 0 4px; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 9px; margin-right: 4px; border: 1px solid #ccc; color: #444; background: #f5f5f5; }
+  .v-null { background: #e0e0e0; border-color: #bbb; color: #333; } .v-shelved { background: #ffe0a3; border-color: #e0b050; color: #6b4a00; }
+  .v-finding { background: #d6e6ff; border-color: #8fb3ea; color: #12407a; } .v-win { background: #d3f2d6; border-color: #7fcf88; color: #1b5e20; }
+  .kv { font-size: 12.5px; margin: 2px 0; } .kv b { color: #555; font-weight: 600; }
+  .live { display: grid; grid-template-columns: repeat(3, auto); gap: 2px 12px; font-size: 12.5px; background: #f6f9ff; border: 1px solid #dbe6f7;
+          border-radius: 4px; padding: 4px 8px; margin: 6px 0; font-variant-numeric: tabular-nums; }
+  .live span { color: #666; }
+  pre.tail { font: 11.5px/1.35 ui-monospace, monospace; margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; } details.long summary { cursor: pointer; font-size: 12.5px; color: #1f5fa8; }
+  details.long p { font-size: 12.5px; margin: 4px 0; white-space: pre-wrap; }
+  @media (max-width: 900px) { .board { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<nav class="nav"><a href="/">training</a> · <a href="/specialists">specialists</a> · <a href="/experiments">experiments</a> · <a href="/optimizations">optimizations</a></nav>
+<h1 id="title">Ledger</h1>
+<div class="muted" id="updated"></div>
+<div id="error"></div>
+<details class="rules" id="rules"><summary>rules</summary><dl id="rulelist"></dl></details>
+<div class="board">
+  <div class="lane"><h2>Ready <span id="n-ready"></span></h2><div id="ready"></div></div>
+  <div class="lane"><h2>Running <span id="n-running"></span></h2><div id="running"></div></div>
+  <div class="lane"><h2>Done <span id="n-done"></span></h2><div id="done"></div></div>
+</div>
+<p class="muted" id="status"></p>
+<script>
+const $ = id => document.getElementById(id);
+const NAME = location.pathname.replace(/^\/+|\/+$/g, '') || 'experiments';  // which runs/<name>.json this page shows
+const TITLES = {experiments: 'Experiment ledger', optimizations: 'Optimization ledger'};
+document.title = $('title').textContent = TITLES[NAME] || NAME;
+const esc = v => String(v).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const fmt = (v, d) => v == null ? '<span class="muted">-</span>' : (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : v.toFixed(d));
+const SHORT = [['indicator', 'indicator'], ['cost', 'cost'], ['depends_on', 'depends on'], ['launch', 'launch'], ['runs', 'runs'],
+               ['started', 'started'], ['finished', 'finished'], ['notes', 'notes']];
+const LONG = [['hypothesis', 'hypothesis'], ['kill', 'kill'], ['extend', 'extend'], ['result', 'result']];
+const show = v => Array.isArray(v) ? v.map(esc).join(', ') : typeof v === 'object' ? esc(JSON.stringify(v)) : esc(v);
+let openState = {};  // keep expanded blocks open across refreshes
+
+function scoreTail(c) {
+  return c.score_tail && c.score_tail.length ? `<pre class="tail">${c.score_tail.map(esc).join('\n')}</pre>` : '';
+}
+
+function live(c) {
+  const L = c.live;
+  if (!L) return c.score_tail && c.score_tail.length ? `<div class="live" style="display:block">${scoreTail(c)}</div>` : '';
+  if (L.error) return `<div class="live" style="display:block"><span>${esc(L.error)}</span>${scoreTail(c)}</div>`;
+  return `<div class="live"><div><span>run</span> ${esc(L.run)}</div><div><span>iter</span> ${fmt(L.iter, 0)}</div><div><span>games</span> ${fmt(L.games, 0)}</div>
+    <div><span>Ham</span> ${fmt(L.vs_ham, 1)}%</div><div><span>best</span> ${fmt(L.best_vs_ham, 1)}%</div><div><span>panel</span> ${L.panel_mean == null ? '<span class="muted">-</span>' : L.panel_mean.toFixed(1) + '%'}</div>
+    <div><span>surprise 20</span> ${fmt(L.surprise20, 4)}</div><div><span>games/h</span> ${fmt(L.games_per_hour, 0)}</div>
+    ${c.score_tail && c.score_tail.length ? `<div style="grid-column:1/-1">${scoreTail(c)}</div>` : ''}</div>`;
+}
+
+function card(c) {
+  const verdict = c.lane === 'done' && c.verdict != null ? `<span class="badge v-${esc(c.verdict)}">${esc(c.verdict)}</span>` : '';
+  const prio = c.lane === 'ready' && c.priority != null ? `<span class="badge">P${esc(c.priority)}</span>` : '';
+  const kv = SHORT.filter(([k]) => c[k] != null && !(Array.isArray(c[k]) && !c[k].length))
+    .map(([k, l]) => `<div class="kv"><b>${l}:</b> ${show(c[k])}</div>`).join('');
+  const longs = LONG.filter(([k]) => c[k] != null);
+  const key = 'c:' + c.id;
+  const det = longs.length ? `<details class="long" data-key="${esc(key)}" ${openState[key] ? 'open' : ''}><summary>${longs.map(([, l]) => l).join(' · ')}</summary>` +
+    longs.map(([k, l]) => `<p><b>${l}:</b> ${esc(c[k])}</p>`).join('') + '</details>' : '';
+  return `<div class="card"><h3>${esc(c.title ?? c.id)}</h3><div>${verdict}<span class="badge">${esc(c.kind ?? '?')}</span>${prio}<span class="muted" style="font-size:11px">${esc(c.id ?? '')}</span></div>
+    ${live(c)}${kv}${det}</div>`;
+}
+
+function render(d) {
+  $('error').innerHTML = '';
+  $('updated').textContent = d.updated ? 'ledger updated ' + d.updated : '';
+  $('rulelist').innerHTML = Object.entries(d.rules || {}).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  const cards = d.cards.filter(c => c && typeof c === 'object');
+  const lanes = {
+    ready: cards.filter(c => c.lane === 'ready').sort((a, b) => (a.priority ?? 1e9) - (b.priority ?? 1e9)),
+    running: cards.filter(c => c.lane === 'running'),
+    done: cards.filter(c => c.lane === 'done').sort((a, b) => String(b.finished ?? '').localeCompare(String(a.finished ?? ''))),
+  };
+  for (const [lane, list] of Object.entries(lanes)) {
+    $(lane).innerHTML = list.map(card).join('') || '<div class="muted">none</div>';
+    $('n-' + lane).textContent = `(${list.length})`;
+  }
+  const other = cards.filter(c => !(c.lane in lanes));
+  if (other.length) $('error').innerHTML = `<div class="err">${other.length} card(s) with an unknown lane not shown: ${other.map(c => esc(c.id ?? '?') + ' (' + esc(c.lane) + ')').join(', ')}</div>`;
+}
+
+document.addEventListener('toggle', e => { if (e.target.dataset && e.target.dataset.key) openState[e.target.dataset.key] = e.target.open; }, true);
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/' + NAME, {cache: 'no-store'});
+    const d = await r.json();
+    if (d.error) { $('error').innerHTML = `<div class="err">${esc(d.error)}</div>`; }
+    else render(d);
+    $('status').textContent = 'fetched ' + new Date().toLocaleTimeString() + ' · refresh every 60 s';
+  } catch (e) { $('error').innerHTML = `<div class="err">could not load /api/${esc(NAME)}: ${esc(e.message)}</div>`; }
+}
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>

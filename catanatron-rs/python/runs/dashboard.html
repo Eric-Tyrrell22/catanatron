@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catan Training Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 12px 16px; background: #fafafa; color: #222; }
+  .nav { font-size: 14px; margin: 0 0 6px; } .nav a { color: #1f5fa8; }
+  h1 { font-size: 20px; margin: 0 0 8px; } h2 { font-size: 16px; margin: 20px 0 8px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 8px; }
+  #runs { display: flex; flex-wrap: wrap; gap: 4px 12px; max-height: 110px; overflow: auto; padding: 6px; background: #fff; border: 1px solid #ddd; }
+  #runs label { white-space: nowrap; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 12px; }
+  .card { background: #fff; border: 1px solid #ddd; padding: 8px; border-radius: 4px; }
+  .card h3 { font-size: 13px; margin: 0 0 4px; font-weight: 600; }
+  .card .c { position: relative; height: 260px; }
+  table { border-collapse: collapse; background: #fff; font-variant-numeric: tabular-nums; }
+  td, th { border: 1px solid #ddd; padding: 3px 8px; text-align: right; } th { background: #f0f0f0; }
+  td:first-child, th:first-child { text-align: left; }
+  .diff { background: #fff3c4; } .muted { color: #888; } .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; }
+  .scroll { overflow-x: auto; } details { margin: 6px 0; } pre { background: #fff; border: 1px solid #ddd; padding: 6px; }
+  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<nav class="nav"><a href="/">training</a> · <a href="/specialists">specialists</a> · <a href="/experiments">experiments</a> · <a href="/optimizations">optimizations</a></nav>
+<h1>Catan AZ training</h1>
+<div class="bar">
+  <span>x axis:
+    <label><input type="radio" name="x" value="iter"> iterations</label>
+    <label><input type="radio" name="x" value="games" checked> games</label>
+    <label><input type="radio" name="x" value="actor_hours"> actor-hours</label></span>
+  <label>smooth <select id="smooth"><option>1</option><option selected>10</option><option>50</option></select> iters</label>
+  <span id="status" class="muted"></span>
+</div>
+<div id="runs"></div>
+<h2>Latest</h2><div class="scroll"><table id="latest"></table></div>
+<h2>Charts</h2><div class="grid" id="charts"></div>
+<h2>Board panel (vs held-out board specialists)</h2><div class="scroll" id="panel"></div>
+<h2>Pig benchmark</h2><div class="scroll" id="pig"></div>
+<h2>Args vs <code>ac</code></h2><div class="scroll" id="args"></div>
+<script>
+const COLORS = ['#1f77b4','#d62728','#2ca02c','#ff7f0e','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f','#bcbd22'];
+const XLABEL = {iter: 'iteration', games: 'games', actor_hours: 'actor-hours'};
+// Each chart: list of [series key, legend suffix, dashed?]
+const CHARTS = [
+  {id: 'ham', title: 'Win rate vs Ham (%)', ham: true},
+  {id: 'panel', title: 'Win rate vs board specialists (panel mean, %)', panel: true},
+  {id: 'surprise', title: 'Search surprise KL(target || prior)', s: [['surprise', '']]},
+  {id: 'loss_pi', title: 'Policy loss', s: [['loss_pi', '']]},
+  {id: 'loss_v', title: 'Value loss', s: [['loss_v', '']]},
+  {id: 'entropy', title: 'Network entropy (solid) vs target entropy (dashed)', s: [['entropy', ' net'], ['target_entropy', ' target', true]]},
+  {id: 'fp_gap', title: 'Fork-pair gap: open (solid), mid (dashed)', s: [['fp_open_gap', ' open'], ['fp_mid_gap', ' mid', true]]},
+  {id: 'fp_alt', title: 'Fork-pair alt_p: open (solid), mid (dashed)', s: [['fp_open_alt_p', ' open'], ['fp_mid_alt_p', ' mid', true]]},
+  {id: 'dpg', title: 'Decisions per game', s: [['decisions_per_game', '']]},
+  {id: 'endgame', title: 'Endgame share', s: [['endgame_share', '']]},
+  {id: 'forks', title: 'Forks per iteration', s: [['forks', '']]},
+  {id: 'shards', title: 'Remote shards per iteration', s: [['remote_shards', '']]},
+  {id: 'lag', title: 'Remote lag (solid) / dropped (dashed)', s: [['remote_lag', ' lag'], ['remote_dropped', ' dropped', true]]},
+  {id: 'gph', title: 'Games per hour (10-iter window)', s: [['games_per_hour', '']], noSmooth: true},
+];
+let baselines = [];
+let runList = [], selected = new Set(), cache = {}, charts = {}, colorOf = {};
+const $ = id => document.getElementById(id);
+const fmt = (v, d = 3) => v == null ? '<span class="muted">-</span>' : (typeof v === 'number' ? (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : v.toFixed(d)) : v);
+const xMode = () => document.querySelector('input[name=x]:checked').value;
+
+async function getJSON(url) { const r = await fetch(url, {cache: 'no-store'}); if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); }
+
+function smooth(ys, w) {
+  if (w <= 1) return ys;
+  const out = []; let sum = 0, cnt = 0; const q = [];
+  for (const y of ys) { q.push(y); if (y != null) { sum += y; cnt++; }
+    if (q.length > w) { const o = q.shift(); if (o != null) { sum -= o; cnt--; } }
+    out.push(y == null || !cnt ? null : sum / cnt); }
+  return out;
+}
+
+function points(run, key, noSmooth) {
+  const s = run.series, xs = s[xMode()], ys = s[key];
+  if (!xs || !ys) return [];
+  // series are downsampled to <=2000 points, so the smoothing window is in stored points
+  const w = noSmooth ? 1 : Math.max(1, Math.round(+$('smooth').value * s.iter.length / Math.max(1, run.n)));
+  const sy = smooth(ys, w), out = [];
+  for (let i = 0; i < xs.length; i++) if (xs[i] != null && sy[i] != null) out.push({x: xs[i], y: sy[i]});
+  return out;
+}
+
+function datasetsFor(def) {
+  const ds = [];
+  for (const name of selected) {
+    const run = cache[name]; if (!run) continue;
+    const col = colorOf[name];
+    if (def.ham) {
+      const pts = run.vs_ham.filter(p => p[xMode()] != null).map(p => ({x: p[xMode()], y: p.pct}));
+      if (pts.length) ds.push({label: name, data: pts, borderColor: col, backgroundColor: col, pointRadius: 2, borderWidth: 1.5});
+      continue;
+    }
+    if (def.panel) {
+      const P = run.panel, pts = [];
+      if (P) P[xMode()].forEach((x, i) => { if (x != null) pts.push({x, y: P.panel_mean[i]}); });
+      if (pts.length) ds.push({label: name, data: pts, borderColor: col, backgroundColor: col, pointRadius: 2, borderWidth: 1.5});
+      continue;
+    }
+    for (const [key, suf, dash] of def.s) {
+      const pts = points(run, key, def.noSmooth);
+      if (pts.length) ds.push({label: name + suf, data: pts, borderColor: col, backgroundColor: col,
+        borderDash: dash ? [5, 4] : [], pointRadius: 0, borderWidth: 1.5});
+    }
+  }
+  if (def.panel && ds.length) {
+    const ctl = {};  // labels like ac@50k: a dotted control curve placed by that run's games/iter/actor-hours
+    for (const b of baselines) if (b.control_run && b[xMode()] != null) (ctl[b.control_run] ||= []).push({x: b[xMode()], y: b.mean});
+    for (const [r, pts] of Object.entries(ctl)) ds.push({label: r + ' control', data: pts.sort((a, b) => a.x - b.x),
+      borderColor: '#555', backgroundColor: '#555', borderDash: [2, 3], pointRadius: 3, borderWidth: 1});
+    const xs = ds.flatMap(d => d.data.map(p => p.x)), lo = Math.min(...xs), hi = Math.max(...xs);
+    baselines.filter(b => !b.control_run).forEach((b, i) => ds.push({label: b.label, data: [{x: lo, y: b.mean}, {x: hi, y: b.mean}],
+      borderColor: ['#999', '#c90', '#6a6', '#a6a'][i % 4], borderDash: [6, 3], pointRadius: 0, borderWidth: 1}));
+  }
+  if (def.ham && ds.length) {
+    const xs = ds.flatMap(d => d.data.map(p => p.x));
+    ds.push({label: '50%', data: [{x: Math.min(...xs), y: 50}, {x: Math.max(...xs), y: 50}], borderColor: '#999',
+      borderDash: [2, 3], pointRadius: 0, borderWidth: 1});
+  }
+  return ds;
+}
+
+function drawCharts() {
+  for (const def of CHARTS) {
+    const ds = datasetsFor(def);
+    let card = $('card_' + def.id);
+    if (!card) {
+      card = document.createElement('div'); card.className = 'card'; card.id = 'card_' + def.id;
+      card.innerHTML = `<h3>${def.title}</h3><div class="c"><canvas></canvas></div>`;
+      $('charts').appendChild(card);
+      charts[def.id] = new Chart(card.querySelector('canvas'), {type: 'line', data: {datasets: []},
+        options: {animation: false, parsing: false, normalized: true, maintainAspectRatio: false,
+          interaction: {mode: 'nearest', intersect: false},
+          plugins: {legend: {labels: {boxWidth: 12, font: {size: 11}}}, decimation: {enabled: true, algorithm: 'lttb', samples: 600}},
+          scales: {x: {type: 'linear', title: {display: true, text: ''}}, y: {}}}});
+    }
+    card.style.display = ds.length ? '' : 'none';  // e.g. fork_pairs absent from older runs
+    const ch = charts[def.id];
+    ch.data.datasets = ds;
+    ch.options.scales.x.title.text = XLABEL[xMode()];
+    ch.update('none');
+  }
+}
+
+function drawLatest() {
+  let h = '<tr><th>run</th><th>iter</th><th>games</th><th>wall h</th><th>actor h</th><th>vs Ham latest</th><th>vs Ham best</th><th>surprise (last 50)</th><th>loss_pi</th><th>loss_v</th></tr>';
+  for (const name of selected) {
+    const r = cache[name]; if (!r) continue; const L = r.latest;
+    h += `<tr><td><span class="sw" style="background:${colorOf[name]}"></span>${name}</td><td>${fmt(L.iter, 0)}</td><td>${fmt(L.games, 0)}</td>
+      <td>${fmt(L.wall_hours, 1)}</td><td>${fmt(L.actor_hours, 1)}</td><td>${fmt(L.vs_ham, 1)}</td><td>${fmt(L.best_vs_ham, 1)}</td>
+      <td>${fmt(L.surprise50, 4)}</td><td>${fmt(L.loss_pi, 4)}</td><td>${fmt(L.loss_v, 4)}</td></tr>`;
+  }
+  $('latest').innerHTML = h;
+}
+
+function drawArgs() {
+  const base = cache.ac && cache.ac.args, names = [...selected].filter(n => cache[n] && cache[n].args);
+  if (!names.length) { $('args').innerHTML = '<span class="muted">no args.json for selected runs</span>'; return; }
+  const keys = [...new Set(names.flatMap(n => Object.keys(cache[n].args)))].sort();
+  const show = v => v === undefined ? '<span class="muted">-</span>' : JSON.stringify(v);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const diffKeys = keys.filter(k => k !== 'run' && names.some(n => !same(cache[n].args[k], base ? base[k] : cache[names[0]].args[k])));
+  const row = k => `<tr><td>${k}</td>${base ? `<td>${show(base[k])}</td>` : ''}${names.map(n => `<td class="${base && !same(cache[n].args[k], base[k]) ? 'diff' : ''}">${show(cache[n].args[k])}</td>`).join('')}</tr>`;
+  const head = `<tr><th>arg</th>${base ? '<th>ac</th>' : ''}${names.map(n => `<th>${n}</th>`).join('')}</tr>`;
+  $('args').innerHTML = (base ? '' : '<p class="muted">ac not found; showing args that differ between selected runs</p>') +
+    `<table>${head}${diffKeys.map(row).join('') || '<tr><td colspan="99" class="muted">no differences</td></tr>'}</table>
+     <details><summary>all args</summary><table>${head}${keys.map(row).join('')}</table></details>`;
+}
+
+function drawPanel() {
+  const rows = [];
+  for (const name of selected) {
+    const r = cache[name]; if (!r || !r.panel) continue;
+    const P = r.panel, i = P.iter.length - 1;
+    rows.push({label: `<span class="sw" style="background:${colorOf[name]}"></span>${name} @${P.iter[i]}`, games: P.games[i], mean: P.panel_mean[i],
+      boards: Object.fromEntries(r.panel_boards.map(b => [b, P['panel_' + b][i]]))});
+  }
+  for (const b of baselines) rows.push({label: '<span class="muted">baseline</span> ' + b.label, games: b.games, mean: b.mean, boards: b.boards});
+  if (!rows.length) { $('panel').innerHTML = '<span class="muted">no .panel files for the selected runs and no baselines yet</span>'; return; }
+  const B = [...new Set(rows.flatMap(r => Object.keys(r.boards)))].sort();
+  $('panel').innerHTML = `<table><tr><th>latest panel line</th><th>games</th><th>mean %</th>${B.map(b => `<th>${b}</th>`).join('')}</tr>` +
+    rows.map(r => `<tr><td>${r.label}</td><td>${fmt(r.games, 0)}</td><td>${fmt(r.mean, 1)}</td>${B.map(b => `<td>${fmt(r.boards[b], 1)}</td>`).join('')}</tr>`).join('') + '</table>';
+}
+
+function drawPig(pig) {
+  const pct = o => o.n ? `${(100 * o.wr).toFixed(1)}% ±${(100 * o.se).toFixed(1)} <span class="muted">(${o.n})</span>` : '<span class="muted">-</span>';
+  let h = '<table><tr><th>file</th><th>games</th><th>win rate ±1SE</th><th>as first</th><th>as second</th><th>turns</th><th>our pts</th><th>Pig pts</th><th>our s/game</th><th>Pig s/game</th><th>boards</th></tr>';
+  for (const p of pig) h += `<tr><td>${p.file}</td><td>${p.all.n}</td><td>${pct(p.all)}</td><td>${pct(p.first)}</td><td>${pct(p.second)}</td>
+    <td>${fmt(p.turns, 1)}</td><td>${fmt(p.our_points, 2)}</td><td>${fmt(p.pig_points, 2)}</td><td>${fmt(p.our_seconds, 1)}</td><td>${fmt(p.pig_seconds, 1)}</td>
+    <td>${p.boards.join(', ') || '<span class="muted">random</span>'}</td></tr>`;
+  h += '</table>';
+  for (const p of pig.filter(p => p.profile)) {
+    const A = p.profile.actions;
+    h += `<h3 style="font-size:13px;margin:12px 0 4px">${p.file}: actions per game (${p.profile.n} games)</h3><table>
+      <tr><th></th>${A.map(a => `<th>${a}</th>`).join('')}</tr>
+      <tr><td>us</td>${p.profile.us.map(v => `<td>${fmt(v, 2)}</td>`).join('')}</tr>
+      <tr><td>Pig</td>${p.profile.pig.map(v => `<td>${fmt(v, 2)}</td>`).join('')}</tr></table>`;
+  }
+  $('pig').innerHTML = h;
+}
+
+function drawRunPicker() {
+  $('runs').innerHTML = runList.map(r => `<label title="${new Date(r.mtime * 1000).toLocaleString()}"><input type="checkbox" value="${r.name}" ${selected.has(r.name) ? 'checked' : ''}> ${r.name}${r.has_vs_ham ? '' : ' <span class="muted">·</span>'}</label>`).join('');
+}
+
+function assignColors() { let i = 0; for (const n of selected) colorOf[n] = COLORS[i++ % COLORS.length]; }
+
+async function refresh() {
+  try {
+    runList = await getJSON('/api/runs');
+    if (!selected.size) {
+      runList.slice(0, 3).forEach(r => selected.add(r.name));
+      if (runList.some(r => r.name === 'ac')) selected.add('ac');
+    }
+    drawRunPicker();
+    const want = new Set([...selected, ...(runList.some(r => r.name === 'ac') ? ['ac'] : [])]);
+    const got = await Promise.all([...want].map(n => getJSON('/api/run?name=' + encodeURIComponent(n)).catch(e => ({error: String(e), name: n}))));
+    for (const r of got) if (!r.error) cache[r.name] = r;
+    baselines = await getJSON('/api/panel');
+    assignColors(); drawLatest(); drawPanel(); drawCharts(); drawArgs();
+    drawPig(await getJSON('/api/pig'));
+    $('status').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · refresh every 60 s';
+  } catch (e) { $('status').textContent = 'error: ' + e.message; }
+}
+
+$('runs').addEventListener('change', e => {
+  if (e.target.checked) selected.add(e.target.value); else selected.delete(e.target.value);
+  refresh();
+});
+document.querySelectorAll('input[name=x]').forEach(el => el.addEventListener('change', drawCharts));
+$('smooth').addEventListener('change', drawCharts);
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>

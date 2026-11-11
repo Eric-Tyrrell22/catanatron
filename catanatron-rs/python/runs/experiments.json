@@ -1,0 +1,245 @@
+{
+ "updated": "2026-11-10T22:35:00-05:00",
+ "rules": {
+  "one_arm_at_a_time": "one training arm uses the fleet at a time; the recorded control curve (runs ac/kc/o4, flat at 51% vs Ham) is the baseline, no control arm",
+  "checkpoints": "25k games: kill only if the learner is unhealthy. 50k: kill if panel flat AND the card's leading indicator flat AND Ham <= control. 100k: kill if Ham < control - 0.5 or panel flat; else run to 300k. 300k: promote (Pig match, ablation) if >= control + 1.5.",
+  "yardsticks": "Ham: 10k network-only games on random boards (\u00b10.5; control band 50.0-51.7). Panel: win rate vs held-out board specialists on their boards (4 boards now, \u00b10.4 mean; 100 boards from sp3 soon). Surprise: KL(search target || prior) in the learner log (0.06 = plateau). Fork gaps: main-line minus forked-alternative result."
+ },
+ "cards": [
+  {
+   "id": "engine-speed",
+   "title": "Self-play engine throughput (agent-driven profiling and optimisation)",
+   "lane": "running",
+   "kind": "infrastructure",
+   "hypothesis": "Games per core-second is what buys experiments: a 256-game shard takes 16 s (34 s for weak nets) on a 64-core actor. Known profile: Layer::forward 55%, encode+evaluate 11%, input compaction 8%, tree 5%. Targets: incremental observation encoding, allocation-free node expansion, cheaper chance-node copies.",
+   "indicator": "benchmark games/s and sims/s at 400/50 sims, 4 threads, same seed; all cargo tests green; numerics bit-identical or shown neutral by self-play",
+   "kill": "stop when remaining ideas are < 3% each",
+   "extend": "",
+   "cost": "agent time only; no fleet",
+   "runs": [],
+   "started": "2026-11-10T22:15",
+   "notes": "Working tree changes only (no commit, no maturin develop, no image push) while training jobs run; adopt via rebuild + push between arms."
+  },
+  {
+   "id": "opening-net",
+   "title": "Separate opening network (initial placements only), evaluated on the board panel",
+   "lane": "ready",
+   "priority": 2,
+   "kind": "arm",
+   "hypothesis": "The missing Elo is one board-conditioned decision (the first placement). A dedicated network used only for the 8 placement decisions can be large (8x1024 or a GNN) at no play-time cost and trained on placement positions alone with sibling-averaged outcome targets and 2,400-sim policies; the main 4x512 net keeps the rest. Pig uses two opening-only evaluators the same way. Both the fine-tuned specialist and the from-scratch oracle converge on node 19 on board 1010194, so the target is learnable from outcomes; the open question is generalisation to held-out boards (hp1 memorised a 50-board pool).",
+   "indicator": "panel mean with the opening net swapped in (held-out boards), first-placement agreement with panel specialists; held-out opening value loss",
+   "kill": "panel <= 37 (continuation's level) after 100k opening-position games",
+   "extend": "panel >= 40",
+   "cost": "~1 day of engine + learner plumbing (two-net evaluator keyed on is_initial_build_phase, key option, bindings, Mirror, actor image; an opening learner reading shard opening positions and publishing models/opening_<run>.ctnn); then one arm (2 actors, ~2 h per 125k games)",
+   "depends_on": "rr2 result (if its reach features already move the panel, build the opening net on them)",
+   "runs": []
+  },
+  {
+   "id": "fs1",
+   "title": "From-scratch single-board oracle (board 1010194)",
+   "lane": "done",
+   "kind": "oracle",
+   "hypothesis": "Board-specific strength comes from outcomes alone: a 4x512 net trained from random weights on one board reaches the fine-tuned specialist's level, uncontaminated by o3's habits, and beats Pig on that board.",
+   "indicator": "ladder on board 1010194 every 10 iterations (runs/fs1b.vs_o3): vs Camon, Spook, Breeze, o3-187, specialist (2k games each, \u00b11.1); vs random in the learner log",
+   "kill": "none (an oracle); stop when the curve is flat for ~30 iterations or at 02:00",
+   "extend": "if it passes the specialist: Pig match on the board (80 games) and re-run the opening/value mining against it as the teacher",
+   "cost": "2 actors, 2-3 h, ~$5",
+   "runs": [
+    "fs1b"
+   ],
+   "started": "2026-11-10T21:16",
+   "notes": "fs1 (lr 3e-4, 6 shards/iter, reuse 4) diverged at iteration ~25 from random init: policy loss 44, value loss 93. Relaunched 21:30 as fs1b: lr 1e-4, reuse 2, 3 shards/iter. | 21:50: beats random 100% from 7k games; at 15k games policy loss 0.86 vs oh1's 0.96 at the same game count (same pace despite lr 1e-4), value loss higher (0.45 vs 0.24). Still ~0% vs Camon at 19k games; Camon itself was 30k games of training.",
+   "score_file": "runs/fs1b.vs_o3",
+   "verdict": "finding",
+   "finished": "2026-11-10T22:25",
+   "result": "45k games from random weights on board 1010194: first placement converges to node 19 with prior 0.999 (the fine-tuned specialist's pick; o3-187 takes node 13), confirming the board knowledge is learnable from outcomes and that o3's pick is wrong here. But its general play is degenerate: 99.5% vs random, 0% vs Camon/Spook/Breeze/o3 from any openings (even Breeze's), 1,250-1,450 decisions per self-play game vs ~850: single-board self-play converges to a mirrored uncontested style. Not usable as a mid-game teacher or Pig test; the 20-iteration fine-tunes are strong because they inherit o3's play."
+  },
+  {
+   "id": "sp3",
+   "title": "100-board held-out specialist panel",
+   "lane": "running",
+   "kind": "infrastructure",
+   "hypothesis": "A 100-board panel (specialist gap, \u00b10.2 mean) detects board-specific evaluation gains at 25-50k games where Ham needs 300k.",
+   "indicator": "boards finished (/specialists page); then score every arm snapshot + baselines on it",
+   "kill": "none",
+   "extend": "",
+   "cost": "2 actors, ~6 h, ~$12",
+   "runs": [
+    "sp3"
+   ],
+   "started": "2026-11-10T20:56",
+   "notes": "21:40: boards 1030012-1030014 came out untrained (their actor was reclaimed and the keeper didn't see specialist learners launched as 'python -u az.py'); keeper fixed, those boards dropped from results and redone. Keep rule: a panel specialist needs >= 400 train steps and >= 6 shards."
+  },
+  {
+   "id": "rr2",
+   "title": "Bundle v2: reach block at 10x learning rate + sibling labels + move forks + hard boards + per-game value weight",
+   "lane": "running",
+   "priority": 1,
+   "kind": "arm",
+   "hypothesis": "rr's components could not be judged because the zero-init reach inputs never engaged (weight norm 2.6 vs 147 after 96 iterations). With their own weights at 10x lr the relational features (reach/secure/contested/affordability) can move the board-specific evaluation.",
+   "indicator": "reach-block weight norm (expect > 20 by 50k games; rr reached 2.6), value loss on the fixed unseen set vs o3-187 (0.154), panel mean",
+   "kill": "50k: panel <= 36.5 AND reach norm < 10 AND Ham <= control. 100k: Ham < control - 0.5 or panel <= 37.",
+   "extend": "panel >= 38 at 50k, or Ham >= control + 1.0",
+   "cost": "2 actors, ~75 min per 100k games, ~$3 per 100k",
+   "runs": [
+    "rr2"
+   ],
+   "launch": "bash runs/rr2_launch.sh, then add rr2 to runs/ax_keeper.sh ARMS",
+   "started": "2026-11-10T22:25",
+   "score_file": "runs/rr2.panel",
+   "notes": "launched with --games 0 (shards only; learner idles when no shard arrives) and 2 actors; panel + Ham scorers follow it"
+  },
+  {
+   "id": "distill-values",
+   "title": "Specialist-to-generalist opening/value distillation",
+   "lane": "ready",
+   "priority": 3,
+   "kind": "arm",
+   "hypothesis": "The specialists' edge is ~8 pts of objectively better placements plus line-specific follow-up. Training the generalist's value head and opening policy on labels from hundreds of cheap specialists (on seeds disjoint from the panel) transfers the placement judgement across boards.",
+   "indicator": "panel mean (held-out boards) within 50k games; first-placement agreement with the panel specialists",
+   "kill": "50k: panel <= 37 (continuation's level)",
+   "extend": "panel >= 39",
+   "cost": "teachers: 1 actor ~5 h (~$5) for 100-300 specialists; arm as usual",
+   "depends_on": "fs1 (are from-scratch specialists better teachers than 20-iteration fine-tunes? the fine-tunes collapse on foreign openings: 26.8%)",
+   "runs": []
+  },
+  {
+   "id": "error-head",
+   "title": "KataGo-style value error head + uncertainty-weighted playouts",
+   "lane": "ready",
+   "priority": 4,
+   "kind": "arm",
+   "hypothesis": "A head predicting the value error lets search weight playouts by uncertainty (+50-75 Elo in KataGo's ablations); the one KataGo value-side mechanism not yet tried here.",
+   "indicator": "value loss on the fixed unseen set; search surprise (should rise if search finds more)",
+   "kill": "standard",
+   "extend": "standard",
+   "cost": "~1 day of engine work (search change) + one arm",
+   "runs": []
+  },
+  {
+   "id": "long-continuation",
+   "title": "Plain continuation to 2M games",
+   "lane": "ready",
+   "priority": 5,
+   "kind": "arm",
+   "hypothesis": "The +2 Elo per 100k crawl of the control runs (value loss -3%) is real and continues; cheap to settle in the background.",
+   "indicator": "Ham slope (+0.2-0.3 pts per 100k in ac/kc), panel",
+   "kill": "Ham slope <= 0 over 500k games",
+   "extend": "",
+   "cost": "1 actor, ~25 h, ~$25",
+   "runs": []
+  },
+  {
+   "id": "gnn",
+   "title": "Relational architecture over the board graph (GNN / hex attention)",
+   "lane": "ready",
+   "priority": 6,
+   "kind": "arm",
+   "hypothesis": "An MLP on one-hots must memorise node x board conjunctions; message passing over the 54-node graph shares the 'value of a spot given its neighbourhood' function across boards (Ben-Assayag & El-Yaniv 2021; Rigaux & Kashima 2024).",
+   "indicator": "panel mean; held-out value loss",
+   "kill": "standard",
+   "extend": "standard",
+   "cost": "1-2 weeks of model + Rust inference work; inference speed is the risk",
+   "depends_on": "rr2 and distill-values results (is the data side enough?)",
+   "runs": []
+  },
+  {
+   "id": "ham-live-fix",
+   "title": "Ham live bot: read-race fix and restart on the OpenHex ladder",
+   "lane": "ready",
+   "priority": 7,
+   "kind": "ops",
+   "hypothesis": "",
+   "indicator": "",
+   "kill": "",
+   "extend": "",
+   "cost": "1 h",
+   "notes": "offline since the 13:16 Nov 9 crash; re-read until events and state agree",
+   "runs": []
+  },
+  {
+   "id": "rr",
+   "title": "Bundle v1: reach features + sibling labels + move forks + hard boards + per-game value weight",
+   "lane": "done",
+   "kind": "arm",
+   "verdict": "null",
+   "result": "60k games: Ham 50.3-50.7% vs control 50.6-50.9%; panel 36.0% vs o3-187 36.2%; value loss 0.161->0.159; surprise 0.061; fork gaps unchanged. Reach columns barely engaged (weight norm 0.6 -> 2.6 vs 147 for old inputs). Killed under the 50k rule; relaunch as rr2 with the reach block at 10x lr.",
+   "runs": [
+    "rr"
+   ],
+   "finished": "2026-11-10T21:15"
+  },
+  {
+   "id": "mf",
+   "title": "Move forks (mid-game road/robber counterfactual branches, 2 per game)",
+   "lane": "done",
+   "kind": "arm",
+   "verdict": "null",
+   "result": "50k games on the control curve (50.4% vs 50.6%). Fork-pair statistic: runner-up alternatives have ~0 outcome gap mid-game (+0.005), so the forks teach little. Diverged at iteration 157 from too many optimizer steps per iteration (12 shards x reuse 4 at 4 actors); keep --remote-max-shards 6.",
+   "runs": [
+    "mf"
+   ],
+   "finished": "2026-11-10T20:12"
+  },
+  {
+   "id": "ls",
+   "title": "Low-sims training (100/25/600 sims, 3x the games per actor-hour)",
+   "lane": "done",
+   "kind": "arm",
+   "verdict": "null",
+   "result": "Equal strength per actor-hour (50.8% vs control 51.0% at 3 h), ~1 pt behind at matched games, 632k games. Needed shard compression preset 1 to not bottleneck the actor.",
+   "runs": [
+    "ls"
+   ],
+   "finished": "2026-11-10T18:52"
+  },
+  {
+   "id": "ax",
+   "title": "Per-action-type auxiliary targets (future builds/buys/knights/trades/robber, final settlements/cities/VP cards)",
+   "lane": "done",
+   "kind": "arm",
+   "verdict": "null",
+   "result": "150k matched games: 50.2% vs control 51.1% vs Ham. The head learns the targets (loss 0.33 -> 0.023) without helping policy or value.",
+   "runs": [
+    "ax",
+    "ac"
+   ],
+   "finished": "2026-11-10T15:17"
+  },
+  {
+   "id": "rollout-openings",
+   "title": "Play-time rollout first placement (best of top-6 spots by 100 network-only games)",
+   "lane": "done",
+   "kind": "play-time",
+   "verdict": "shelved",
+   "result": "+8.7 vs a deterministic copy of itself, +2 to +9 vs other nets/sampling opponents, but 40.4% vs Pig (baseline 44.6%, 57 games): rollouts estimate value under our own policy and inherit its blind spots. Opening roads and mid-game roads add nothing. Key option o1/<K>x<N> kept.",
+   "runs": [],
+   "finished": "2026-11-10T20:48"
+  },
+  {
+   "id": "soup",
+   "title": "Weight soup of sibling arms (ac, ax, vq25, kc)",
+   "lane": "done",
+   "kind": "cheap",
+   "verdict": "null",
+   "result": "51.4% vs Ham, 50.0% vs ac: the siblings sit in one basin.",
+   "runs": [],
+   "finished": "2026-11-10T16:23"
+  },
+  {
+   "id": "specialist-diagnosis",
+   "title": "Where the headroom is: specialists, opening swap, feature mining",
+   "lane": "done",
+   "kind": "analysis",
+   "verdict": "finding",
+   "result": "Specialists beat every o3 sibling 75-77% on their board (not exploitation); the 1010194 specialist beats Pig 73% where Ham gets 38.8% (first seat 15%); Ham's first pick there is the ore/wheat node 13 in 100% of games, the specialist's the brick/sheep/wheat node 19. Opening swap: placements are worth ~+8 pts under identical play; the specialist collapses from foreign openings (26.8%), so ~20 pts of its edge is line-specific follow-up. Search on placements (20k sims) recovers nothing. Mining: reach/contention beyond 2 roads explains 17% of mid-game value gap; first placement agreement with specialists 50%, per-resource valuation flips by board (except ore: specialists weight it less everywhere).",
+   "runs": [
+    "sp2-1010194",
+    "sp2-1010752",
+    "sp2-1011188",
+    "sp2-1012006"
+   ],
+   "finished": "2026-11-10T21:15"
+  }
+ ]
+}

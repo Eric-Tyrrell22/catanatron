@@ -1,0 +1,296 @@
+{
+ "updated": "2026-11-10T23:26:00-05:00",
+ "rules": {
+  "goal": "self-play throughput (games/s and sims/s per core) in the Rust engine; actors are 64-core Zen 4/5 spot instances (znver4), the dev box a 16-thread Zen 2",
+  "acceptance": "keep a change only if it gains >= 3% on the benchmark (400/50 sims, 4 threads, fixed seed, python/openhex_models/ham.ctnn) with all cargo tests green; numerics bit-identical, or flagged and shown neutral by self-play (same net vs itself 50 +/- 1 over 4k games)",
+  "deployment": "working-tree changes only while training runs; adopt between arms via cargo test, maturin develop and infra/push.sh"
+ },
+ "cards": [
+  {
+   "id": "bench",
+   "title": "Reliable throughput benchmark (games/s, sims/s, fixed seed)",
+   "lane": "done",
+   "verdict": "win",
+   "finished": "2026-11-10T23:10",
+   "kind": "infrastructure",
+   "hypothesis": "No optimisation is believable without a stable baseline: N self-play games at 400/50 sims on 4 threads with the ham.ctnn net, reporting games/s and sims/s; plus a weak-net scenario (long games).",
+   "indicator": "run-to-run variance < 2%",
+   "cost": "1 h",
+   "runs": [],
+   "started": "2026-11-10T22:15",
+   "result": "Baseline (ham.ctnn, 400/50 sims, 4 threads, seed 99): 0.139-0.208 games/s/thread, 15.7k-23.4k sims/s/thread (44.6 ms/example); after the three kept changes 0.223-0.233 games/s/thread in the same 8-game run (base 0.199-0.215 back-to-back), -7% cycles. Run-to-run spread up to 1.5x from the box's learners, so A/B uses back-to-back perf stat cycles:u + the self-play checksum. Usage: cargo run --release --example selfplay_bench -- python/openhex_models/ham.ctnn [games] [threads] [seed]",
+   "measurements": [
+    {
+     "when": "2026-11-10T22:20",
+     "games": 32,
+     "threads": 4,
+     "secs": 57.61,
+     "games_per_s_thread": 0.139,
+     "sims_per_s_thread": 15672
+    },
+    {
+     "when": "2026-11-10T22:30",
+     "games": 8,
+     "threads": 4,
+     "secs": 9.64,
+     "games_per_s_thread": 0.208,
+     "sims_per_s_thread": 23387,
+     "user_s": 33.38
+    },
+    {
+     "when": "2026-11-10T23:25",
+     "what": "second-net scenario, breeze.ctnn (obs 2202, 8 tensors), 8 games x 4 threads, base vs new back-to-back, 2 rounds: [cycles:u G, wall s, sims/s/thread]; checksum 246.0024 identical; games were not longer than ham's (6895 vs 6883 decisions)",
+     "base": [
+      [89.6, 6.88, 31362],
+      [93.06, 7.25, 29791]
+     ],
+     "new": [
+      [78.58, 6.15, 35122],
+      [83.12, 6.38, 33839]
+     ]
+    }
+   ],
+   "notes": "examples/selfplay_bench.rs (actor settings: OpenHex 1v1, 400/50 sims, 2400 placement, endgame+opening branch, 1 placement fork; SelfPlayData now also reports sims and evals). Baseline, ham.ctnn, 4 threads, seed 99: 32 games 57.6 s wall = 0.139 games/s/thread, 15.7k sims/s/thread, 44.6 ms/example (3.61M sims, 3.66M evals, checksum 1206.6847); 8 games: 9.6 s, 23.4k sims/s/thread, 33.4 s user CPU (the two runs disagree by 1.5x: the box's two learners load the memory system; wall/user time vary +-5-50% run to run, so A/B is done back-to-back with perf stat cycles:u and the self-play checksum as the bit-identity check)."
+  },
+  {
+   "id": "incremental-encoding",
+   "title": "Incremental / cached observation encoding per node",
+   "lane": "ready",
+   "priority": 1,
+   "kind": "optimisation",
+   "hypothesis": "Each expanded node re-encodes the full ~2200-input observation (encode + evaluate ~11% of a simulation). Caching the parent's encoding and patching the few changed fields, or encoding only the sparse diff, removes most of that.",
+   "indicator": "benchmark delta; sparse_observation_matches_dense stays green",
+   "cost": "half a day",
+   "runs": []
+  },
+  {
+   "id": "alloc-free-expansion",
+   "title": "Allocation-free node expansion and simulation reuse",
+   "lane": "ready",
+   "priority": 2,
+   "kind": "optimisation",
+   "hypothesis": "Per-child Vec allocations, per-simulation temporaries and Game copies at chance nodes (execute_with_luck copies the game per outcome) cost malloc time (~2%) and cache misses; arena/bump allocation per search and reused buffers remove them.",
+   "indicator": "benchmark delta; alloc_profile example",
+   "cost": "half a day",
+   "runs": []
+  },
+  {
+   "id": "first-layer-f16",
+   "title": "First-layer weight format and gather layout for active inputs",
+   "lane": "done",
+   "priority": 3,
+   "kind": "optimisation",
+   "hypothesis": "Layer::forward is ~55% of a simulation; the first layer gathers ~100 active input rows of f16 weights (F16C conversion each time). Keeping first-layer rows f32, or laying rows out for the gather / prefetching, may beat the conversion cost. Profile (perf, 8 games): Layer::forward 71.5% self, encoding ~11%, Evaluator::evaluate (ReLU compaction) 4.9%, tree ~5%, malloc ~2%. Measured per eval: 375 of 2202 inputs nonzero (spots block), hidden activity 165/165/103 of 512, policy 152 rows: ~7.5k row-tiles per eval, the first layer 40% of them. IPC 1.9-3.0: the kernel is near the FP-pipe bound (8 cvtph2ps + 8 FMA per row-tile), not purely memory-bound.",
+   "indicator": "benchmark delta; batched_forward_matches_single and parity (bench/parity.npz) stay bit-identical or flagged",
+   "cost": "half a day",
+   "runs": [],
+   "started": "2026-11-10T22:45",
+   "verdict": "shelved",
+   "finished": "2026-11-10T22:50",
+   "result": "Layout/prefetch part done under block-major-prefetch. f32 first-layer rows shelved by analysis: the kernel is near the FP-pipe bound (8 cvtph2ps + 8 FMA per 64 outputs per row); f32 rows remove the conversions but double the weight traffic (375 active rows x 2 KB from a 4.5 MB matrix per eval), which L2 can't hold, so it would be L3-bandwidth bound; not measured."
+  },
+  {
+   "id": "legal-moves",
+   "title": "Cheaper legal-move generation and action-space masking",
+   "lane": "ready",
+   "priority": 4,
+   "kind": "optimisation",
+   "hypothesis": "generate_playable_actions runs at every node; the 357-slot mask fill and trade enumeration can be incremental or table-driven.",
+   "indicator": "benchmark delta; engine tests green",
+   "cost": "half a day",
+   "runs": []
+  },
+  {
+   "id": "f16-weights",
+   "title": "f16 weights with F16C in nn.rs",
+   "lane": "done",
+   "kind": "optimisation",
+   "verdict": "win",
+   "result": "~11% faster forward; log-prob error 25x smaller than torch bf16 (Nov 2).",
+   "finished": "2026-11-02"
+  },
+  {
+   "id": "register-tiling",
+   "title": "Register-tiled forward (compact nonzero inputs, 64-output blocks)",
+   "lane": "done",
+   "kind": "optimisation",
+   "verdict": "win",
+   "result": "single-thread eval 12 us -> 8 us, bit-identical; MCTS games 1.44x faster (Nov 2).",
+   "finished": "2026-11-02"
+  },
+  {
+   "id": "sparse-encoder",
+   "title": "Sparse observation encoder + forward_sparse in the MCTS evaluator",
+   "lane": "done",
+   "kind": "optimisation",
+   "verdict": "win",
+   "result": "~19% on MCTS games (160 games 5.2 s -> 4.2 s), identical results; total MCTS speed-up that day ~1.77x. Sink::one_hot skipped by the sparse sink: a further ~2.5-3%.",
+   "finished": "2026-11-02"
+  },
+  {
+   "id": "batched-forward",
+   "title": "Batched leaf evaluation (forward_batch, union of active inputs)",
+   "lane": "done",
+   "kind": "optimisation",
+   "verdict": "null",
+   "result": "2x per eval at 4 positions, 1.44x faster games at K=8, but no strength per time at 100 sims (virtual loss). Kept as an option (MCTS:<sims>x<batch>).",
+   "finished": "2026-11-02"
+  },
+  {
+   "id": "actor-cpu",
+   "title": "Actor CPU utilisation: par_map chunking, background shard upload, Arc refcount contention",
+   "lane": "done",
+   "kind": "optimisation",
+   "verdict": "win",
+   "result": "actors ~33% -> ~90% CPU; fixed-board self-play 1.7x faster (one map copy per game). mimalloc was 9% slower (reverted). Shard compression preset 6 -> 1 for low-sims actors.",
+   "finished": "2026-11-09"
+  },
+  {
+   "id": "block-major-prefetch",
+   "title": "Block-major f16 weight layout + software prefetch of upcoming active rows",
+   "lane": "done",
+   "kind": "optimisation",
+   "hypothesis": "Weights stored per 64-output block (input-major inside), so a pass over the active rows of one block sweeps forward through one region a few lines apart; the row PREFETCH entries ahead in the nz list is prefetched (2 lines). Same FMA order: bit-identical.",
+   "indicator": "nn_speed us/eval; selfplay_bench checksum unchanged; cycles:u",
+   "cost": "2 h",
+   "started": "2026-11-10T22:40",
+   "runs": [],
+   "verdict": "win",
+   "finished": "2026-11-10T22:50",
+   "result": "Kept (PF_MODE 2, PREFETCH 12). nn_speed single eval, 7 interleaved rounds: cycles/eval median 125.1k -> 117.2k (-6%), min 117.4k -> 115.5k; under memory contention from the learners up to 1.7x (200k -> 117k). Self-play 8 games x 4 threads, 3 rounds, with simd-compact: cycles:u 132.4G -> 127.9G (-3.4%), instructions +5% (prefetch address math), wall 9.2-10.2 s -> 9.15-9.23 s; checksum 366.6948 unchanged (bit-identical). Variants rejected: next-block row prefetch (+18% instr, no gain), TILE=12 blocks (register spills, +30% cycles), distances 16/24 (no gain).",
+   "measurements": [
+    {
+     "what": "nn_speed cycles/eval median (7 rounds)",
+     "base": 125075,
+     "none": 126852,
+     "ahead8": 115805,
+     "ahead12": 117227,
+     "ahead16": 127501,
+     "ahead24": 125190
+    },
+    {
+     "what": "selfplay_bench 8g x 4t cycles:u G (3 rounds)",
+     "base": [
+      135.07,
+      130.45,
+      132.41
+     ],
+     "new": [
+      128.53,
+      127.94,
+      127.23
+     ]
+    }
+   ]
+  },
+  {
+   "id": "simd-compact",
+   "title": "SIMD ReLU compaction (mask + bit iteration instead of a branch-free pass over 512 outputs)",
+   "lane": "done",
+   "kind": "optimisation",
+   "hypothesis": "The 4 compaction passes per eval (2048 iterations) are ~5% of a simulation; comparing 8 lanes at once and visiting only set bits scales with the ~150 active entries. Same entries in the same order: bit-identical.",
+   "indicator": "Evaluator::evaluate self time; checksum",
+   "cost": "30 min",
+   "started": "2026-11-10T22:40",
+   "runs": [],
+   "verdict": "win",
+   "finished": "2026-11-10T22:50",
+   "result": "Instructions per eval 229.6k -> 211.6k (-8%) with the block layout and no prefetch; included in the block-major-prefetch self-play numbers. Bit-identical."
+  },
+  {
+   "id": "cross-game-batching",
+   "title": "Lockstep batching of leaf evaluations across K independent games per thread",
+   "lane": "ready",
+   "priority": 1,
+   "kind": "optimisation",
+   "hypothesis": "forward_batch is 1.7x cheaper per position at K=4 (f16 conversion shared across positions) and cross-game batching needs no virtual loss, so every game's trajectory stays identical; the forward pass is ~72% of a simulation, so ~1.4x overall. Needs the search and the self-play loop to be resumable (state machine) or K game threads per core with a rendezvous evaluator (context-switch overhead).",
+   "indicator": "benchmark delta; selfplay checksum unchanged",
+   "cost": "1-2 days",
+   "runs": []
+  },
+  {
+   "id": "static-fold-first-layer",
+   "title": "Fold the board-constant inputs of the first layer into a per-board bias",
+   "lane": "ready",
+   "priority": 3,
+   "kind": "optimisation",
+   "hypothesis": "~120 of the ~375 active inputs (ports, tile resources, numbers, probabilities, seated flags) never change during a game; summing their weight rows once per board removes ~30% of first-layer row-tiles (~12% of the forward). Changes the float summation order (not bit-identical): flag + self-play neutrality check.",
+   "indicator": "benchmark delta; play_bots same-net A/B 50 +/- 1",
+   "cost": "3 h",
+   "runs": []
+  },
+  {
+   "id": "spot-pips-table",
+   "title": "Per-robber-tile table of node production pips for the spots block",
+   "lane": "ready",
+   "priority": 4,
+   "kind": "optimisation",
+   "hypothesis": "add_production is called for every land node at every encode (1.5%); the per-node pips depend only on the robber tile, so a 19 x 54 x 5 table built with the ObservationSpace gives the same floats (same summation order per node).",
+   "indicator": "encoding_speed; sparse_observation_matches_dense green; checksum",
+   "cost": "1 h",
+   "runs": []
+  },
+  {
+   "id": "encode-skip-empty-seats",
+   "title": "Skip the all-zero feature runs of unseated players in the encoder",
+   "lane": "ready",
+   "priority": 5,
+   "kind": "optimisation",
+   "hypothesis": "In 1v1 two of the four relative seats are empty, yet ~90 zero features are written per encode; a Sink::zeros(n) that only advances the index saves them. Identical output.",
+   "indicator": "encoding_speed; tests green",
+   "cost": "30 min",
+   "runs": []
+  },
+  {
+   "id": "child-no-vec-clone",
+   "title": "Game::child: copy the state without cloning the playable-actions Vec that is regenerated anyway",
+   "lane": "ready",
+   "priority": 6,
+   "kind": "optimisation",
+   "hypothesis": "copy_without_history clones playable_actions and execute_unchecked immediately regenerates them; node creation (~1-2% with memmove) can skip the clone and reuse a pooled Vec.",
+   "indicator": "benchmark delta; alloc_profile",
+   "cost": "1 h",
+   "runs": []
+  },
+  {
+   "id": "legal-only-policy-head",
+   "title": "Policy head only for the legal moves (per-slot gather, same FMA order)",
+   "lane": "done",
+   "kind": "optimisation",
+   "hypothesis": "The policy layer computes all 357 logits (152 active rows x 6 blocks = 12% of the forward) but search uses ~20. Accumulating each legal slot's logit over the active inputs in the same order (8 slots per vector, f16 weights gathered output-major) is bit-identical and scales with the legal moves.",
+   "indicator": "nn/selfplay checksum unchanged; cycles:u",
+   "cost": "2 h",
+   "started": "2026-11-10T22:55",
+   "runs": [],
+   "verdict": "win",
+   "finished": "2026-11-10T23:10",
+   "result": "Kept: PolicyValueNet::forward_sparse_for + policy_subset (output-major f16 copy of the policy weights, 8 slots per vector, one FMA per active input in nz order), used by mcts::Evaluator::evaluate; new test subset_policy_matches_full passes (exact equality with the full layer for all slots). Self-play 8 games x 4 threads vs the untouched baseline binary, all three kernel changes together: cycles:u 130.7G -> 121.1G and 135.0G -> 125.6G (-7%) in the two clean rounds (a third round was hit by a contention spike), instructions 238.6G -> 235.0G, wall 9.3 s -> 8.6 s and 10.0 s -> 9.0 s; checksum 366.6948 unchanged (bit-identical). Not applied to evaluate_batch (luck accounting, 1.4% of evals) or to NetPlayer.",
+   "measurements": [
+    {
+     "what": "selfplay_bench 8g x 4t, base vs new (prefetch + simd-compact + legal-only policy), [cycles:u G, wall s] per round",
+     "base": [
+      [130.71, 9.29],
+      [134.96, 10.04],
+      [141.31, 11.39]
+     ],
+     "new": [
+      [121.06, 8.58],
+      [125.61, 8.98],
+      [144.99, 15.45]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "avx512-tile",
+   "title": "Wider register tiles on the znver4 actors (AVX-512: 32 registers, 16-lane f16 conversion)",
+   "lane": "ready",
+   "priority": 2,
+   "kind": "optimisation",
+   "hypothesis": "On Zen 4 the kernel could use ymm16-31 (TILE 16-24 accumulators) or zmm (half the instructions per row-tile), cutting front-end and loop overhead; the dev box (Zen 2, AVX2) cannot measure it, so it needs a cfg(target_feature = \"avx512f\") path benchmarked on an actor.",
+   "indicator": "nn_speed on an actor; bit-identical (same FMA order)",
+   "cost": "3 h + an actor",
+   "runs": []
+  }
+ ]
+}

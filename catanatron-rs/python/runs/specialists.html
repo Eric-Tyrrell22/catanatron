@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Board Specialists</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 12px 16px; background: #fafafa; color: #222; }
+  h1 { font-size: 20px; margin: 0 0 8px; } h2 { font-size: 16px; margin: 20px 0 8px; }
+  .nav { font-size: 14px; margin: 0 0 6px; } .nav a { color: #1f5fa8; }
+  .tiles { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tile { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 6px 12px; min-width: 110px; }
+  .tile b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .tile span { color: #666; font-size: 12px; }
+  .card { background: #fff; border: 1px solid #ddd; padding: 8px; border-radius: 4px; max-width: 760px; }
+  .card .c { position: relative; height: 260px; }
+  table { border-collapse: collapse; background: #fff; font-variant-numeric: tabular-nums; }
+  td, th { border: 1px solid #ddd; padding: 3px 8px; text-align: right; } th { background: #f0f0f0; cursor: pointer; user-select: none; }
+  td:first-child, th:first-child { text-align: left; }
+  tr.running td { background: #e8f2ff; } .muted { color: #888; } .scroll { overflow-x: auto; }
+  code.line { display: block; background: #fff; border: 1px solid #ddd; padding: 6px; margin-top: 8px; white-space: pre-wrap; }
+  .boards { display: flex; flex-wrap: wrap; gap: 10px; }
+  .board { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 4px; text-align: center; font-size: 12px; }
+  .board.running { border-color: #1f77b4; }
+</style>
+</head>
+<body>
+<nav class="nav"><a href="/">training</a> · <a href="/specialists">specialists</a> · <a href="/experiments">experiments</a> · <a href="/optimizations">optimizations</a></nav>
+<h1>Board specialists (sp3)</h1>
+<div class="tiles" id="tiles"></div>
+<code class="line" id="current"></code>
+<h2>Specialist gap: win rate vs the generalist at iteration 20</h2>
+<div class="card"><div class="c"><canvas id="hist"></canvas></div></div>
+<h2>Boards</h2><div class="scroll"><table id="table"></table></div>
+<h2>Board drawings (top by gap, plus the running board)</h2><div class="boards" id="boards"></div>
+<h2>Earlier batch sp2 (4 boards, for reference)</h2><div class="scroll" id="sp2"></div>
+<p class="muted" id="status"></p>
+<script>
+const $ = id => document.getElementById(id);
+const pct = v => v == null ? '<span class="muted">-</span>' : (100 * v).toFixed(1) + '%';
+const fmt = (v, d) => v == null ? '<span class="muted">-</span>' : (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : v.toFixed(d));
+const hm = m => m == null ? '-' : (m >= 60 ? `${Math.floor(m / 60)} h ${Math.round(m % 60)} min` : `${Math.round(m)} min`);
+const TERRAIN = {forest: '#2e7d32', hills: '#c1693c', pasture: '#9ccc65', fields: '#f2c94c', mountains: '#8d8d8d', desert: '#e8d8a8'};
+const COLS = [['seed', 'seed', 0], ['status', 'status'], ['win10', 'win @10', 'p'], ['win20', 'win @20', 'p'], ['minutes', 'minutes', 1], ['games', 'games', 0]];
+let data = null, sortKey = 'win20', sortDir = -1, hist = null;
+
+function tile(label, value) { return `<div class="tile"><span>${label}</span><b>${value}</b></div>`; }
+
+function boardSvg(layout) {
+  const s = 15.5, w = 140, h = 128, r3 = Math.sqrt(3);
+  let out = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+  for (const t of layout) {
+    const cx = w / 2 + s * r3 * (t.q + t.r / 2), cy = h / 2 + s * 1.5 * t.r;
+    const pts = [...Array(6)].map((_, i) => { const a = Math.PI / 180 * (60 * i - 30);
+      return `${(cx + s * Math.cos(a)).toFixed(1)},${(cy + s * Math.sin(a)).toFixed(1)}`; }).join(' ');
+    out += `<polygon points="${pts}" fill="${TERRAIN[t.t] || '#ccc'}" stroke="#fff" stroke-width="1"/>`;
+    if (t.n != null) {
+      const hot = t.n === 6 || t.n === 8;
+      out += `<circle cx="${cx}" cy="${cy}" r="6.5" fill="#fff8e7"/><text x="${cx}" y="${cy + 3.5}" font-size="9.5" text-anchor="middle"
+        font-weight="${hot ? 700 : 400}" fill="${hot ? '#c62828' : '#222'}">${t.n}</text>`;
+    }
+  }
+  return out + '</svg>';
+}
+
+function drawTable() {
+  const sp = data.sp3, rows = [...sp.finished].sort((a, b) => {
+    const x = a[sortKey], y = b[sortKey];
+    return x == null ? 1 : y == null ? -1 : (x < y ? -1 : x > y ? 1 : 0) * sortDir;
+  });
+  const all = [...sp.running.filter(r => r.status === 'running'), ...rows];
+  const head = '<tr>' + COLS.map(([k, l]) => `<th data-k="${k}">${l}${k === sortKey ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
+  $('table').innerHTML = head + (all.length ? all.map(r => `<tr class="${r.status === 'running' ? 'running' : ''}">` +
+    COLS.map(([k, , d]) => `<td>${d === 'p' ? pct(r[k]) : d == null ? (r.status === 'running' ? `running (it ${r.iter ?? '-'})` : r[k]) : k === 'seed' ? r[k] : fmt(r[k], d)}</td>`).join('') + '</tr>').join('')
+    : '<tr><td colspan="6" class="muted">no boards yet</td></tr>');
+}
+
+function draw() {
+  const sp = data.sp3, run = sp.running.filter(r => r.status === 'running');
+  $('tiles').innerHTML = tile('finished', `${sp.finished.length} / ${sp.total}`) + tile('in progress', run.map(r => r.seed).join(', ') || '0') +
+    tile('median per board', hm(sp.median_minutes)) + tile('est. remaining', hm(sp.eta_minutes)) +
+    tile('mean gap (win @20)', pct(sp.final_mean)) + tile('boards > 60%', sp.above60) + tile('boards > 70%', sp.above70);
+  $('current').textContent = sp.current_line || 'no sp3.out yet';
+
+  const lo = 0.3, step = 0.05, bins = Array(14).fill(0);  // 30%..100% in 5-point bins
+  for (const r of sp.finished) if (r.final != null) bins[Math.max(0, Math.min(13, Math.floor((r.final - lo) / step + 1e-9)))]++;
+  const labels = bins.map((_, i) => `${Math.round(100 * (lo + i * step))}–${Math.round(100 * (lo + (i + 1) * step))}%`);
+  if (!hist) hist = new Chart($('hist'), {type: 'bar', data: {labels, datasets: [{label: 'boards', data: bins, backgroundColor: '#1f77b4'}]},
+    options: {animation: false, maintainAspectRatio: false, plugins: {legend: {display: false}},
+      scales: {y: {beginAtZero: true, ticks: {precision: 0}, title: {display: true, text: 'boards'}},
+               x: {title: {display: true, text: 'specialist win rate vs generalist (50% = no gain)'}}}}});
+  hist.data.datasets[0].data = bins; hist.update('none');
+
+  drawTable();
+  const drawn = [...run, ...[...sp.finished].filter(r => r.layout).sort((a, b) => b.final - a.final)].filter(r => r.layout);
+  $('boards').innerHTML = !sp.drawings ? '<span class="muted">catanatron_rs not importable in the server; drawings omitted</span>'
+    : drawn.length ? drawn.map(r => `<div class="board ${r.status === 'running' ? 'running' : ''}">${boardSvg(r.layout)}<br>${r.seed} · ${r.status === 'running' ? 'running' : pct(r.final)}</div>`).join('')
+    : '<span class="muted">no boards yet</span>';
+
+  const s2 = data.sp2, iters = [...new Set(s2.finished.flatMap(r => Object.keys(r.evals).map(Number)))].sort((a, b) => a - b);
+  $('sp2').innerHTML = `<table><tr><th>seed</th>${iters.map(i => `<th>win @${i}</th>`).join('')}<th>minutes</th><th>games</th></tr>` +
+    s2.finished.map(r => `<tr><td>${r.seed}</td>${iters.map(i => `<td>${pct(r.evals[i])}</td>`).join('')}<td>${fmt(r.minutes, 1)}</td><td>${fmt(r.games, 0)}</td></tr>`).join('') +
+    `</table><p class="muted">mean @20: ${pct(s2.final_mean)}${s2.running.length ? ` · unfinished attempts ignored: ${s2.running.map(r => r.run).join(', ')}` : ''}</p>`;
+}
+
+$('table').addEventListener('click', e => {
+  const k = e.target.closest('th')?.dataset.k; if (!k) return;
+  if (k === sortKey) sortDir = -sortDir; else { sortKey = k; sortDir = k === 'seed' ? 1 : -1; }
+  drawTable();
+});
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/specialists', {cache: 'no-store'});
+    if (!r.ok) throw new Error('/api/specialists ' + r.status);
+    data = await r.json(); draw();
+    $('status').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · refresh every 60 s';
+  } catch (e) { $('status').textContent = 'error: ' + e.message; }
+}
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+[
+ {
+  "seed": 1010752,
+  "group": "random",
+  "regret_sum": 0.2293,
+  "kl_sum": 2.8633
+ },
+ {
+  "seed": 1010194,
+  "group": "random",
+  "regret_sum": 0.042,
+  "kl_sum": 1.8582
+ },
+ {
+  "seed": 1012006,
+  "group": "random",
+  "regret_sum": 0.3043,
+  "kl_sum": 3.9691
+ },
+ {
+  "seed": 1011188,
+  "group": "random",
+  "regret_sum": 0.0861,
+  "kl_sum": 2.7019
+ },
+ {
+  "seed": 1012535,
+  "group": "random",
+  "regret_sum": 0.1147,
+  "kl_sum": 1.6445
+ },
+ {
+  "seed": 1010565,
+  "group": "random",
+  "regret_sum": 0.1547,
+  "kl_sum": 2.3877
+ },
+ {
+  "seed": 1011737,
+  "group": "random",
+  "regret_sum": 0.3562,
+  "kl_sum": 3.9473
+ },
+ {
+  "seed": 1011521,
+  "group": "random",
+  "regret_sum": 0.6869,
+  "kl_sum": 3.7209
+ }
+]
