@@ -92,6 +92,50 @@ fn batched_forward_matches_single() {
     }
 }
 
+/// The legal-moves-only policy head gives the full layer's logits exactly,
+/// for any subset of slots in any order, with -inf for missing slots.
+#[test]
+fn subset_policy_matches_full() {
+    use catanatron::encoding::{ActionSpace, ObservationSpace};
+    use catanatron::nn::Scratch;
+    if !std::path::Path::new(MODEL).exists() {
+        eprintln!("skipping: no exported model at {MODEL}");
+        return;
+    }
+    let net = load_net(MODEL).unwrap();
+    let mut scratch = Scratch::default();
+    let (mut full, mut part) = (Vec::new(), Vec::new());
+    let mut checked = 0;
+    for seed in 0..3 {
+        let mut g = Game::new(&COLORS[..2], &GameConfig { seed: Some(seed), ..Default::default() });
+        let mut bots: Vec<_> = (0..2).map(|i| from_key("F", COLORS[i], seed + i as u64).unwrap()).collect();
+        let space = ObservationSpace::new(&g.state.board.map);
+        let actions = ActionSpace::new(&g.state.board.map);
+        while !g.is_over() {
+            let mut nz = Vec::new();
+            let n = space.encode_sparse_into(&g.state, g.state.current_color(), &mut nz);
+            let v = net.forward_sparse(&nz[..n], &mut scratch, &mut full);
+            // The legal moves, then a gap, then every slot backwards.
+            let mut slots: Vec<u32> = g.playable_actions.iter().map(|a| actions.encode(&g.state, a).map_or(u32::MAX, |i| i as u32)).collect();
+            slots.push(u32::MAX);
+            slots.extend((0..net.action_size as u32).rev());
+            let w = net.forward_sparse_for(&nz[..n], &slots, &mut scratch, &mut part);
+            assert_eq!(v, w, "value");
+            assert_eq!(part.len(), slots.len());
+            for (&s, &l) in slots.iter().zip(&part) {
+                if s == u32::MAX {
+                    assert_eq!(l, f32::NEG_INFINITY);
+                } else {
+                    assert_eq!(l, full[s as usize], "slot {s}");
+                }
+            }
+            checked += 1;
+            g.play_tick(&mut bots).unwrap();
+        }
+    }
+    assert!(checked > 100);
+}
+
 /// Gumbel root search: stays within the budget, plays a legal move that was
 /// searched, and is deterministic for a seed.
 #[test]
