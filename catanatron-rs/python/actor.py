@@ -98,16 +98,27 @@ def main():
                 del nets[k]
         games = control["games_per_core"] * cores
         seed = int.from_bytes(os.urandom(8), "little") >> 1
+        try:
+            # The learner deletes a network's key once it has published the next one, so a control file
+            # read just before a publish can name keys that are already gone: re-read it rather than die.
+            if teacher is None:
+                # An opening network (az.py --opening-net) takes the initial placements.
+                opening = net(control["opening_model"]) if control.get("opening_model") else None
+                main, pool = net(control["model"]), [net(k) for k in control["pool"]]
+            else:
+                teacher_net = net(teacher["key"])
+        except s3.exceptions.NoSuchKey as e:
+            print(f"network key gone (the learner moved on): {e}; re-reading the control file", flush=True)
+            time.sleep(2)
+            continue
         t0 = time.time()
         if teacher is None:
-            # An opening network (az.py --opening-net) takes the initial placements.
-            opening = net(control["opening_model"]) if control.get("opening_model") else None
             d = catanatron_rs.self_play(
-                net(control["model"]), games, seed, args.threads,
-                pool=[net(k) for k in control["pool"]], pool_share=control["pool_share"] if control["pool"] else 0.0,
+                main, games, seed, args.threads,
+                pool=pool, pool_share=control["pool_share"] if control["pool"] else 0.0,
                 opening_net=opening, **control["self_play"])
         else:
-            d = catanatron_rs.self_play(net(teacher["key"]), games, seed, args.threads,
+            d = catanatron_rs.self_play(teacher_net, games, seed, args.threads,
                                         **{**control["self_play"], "board": teacher["board"]})
         t_play = time.time() - t0
         meta = {"run": control["run"], "model_iter": control["iter"], "games": games, "actor": actor,
