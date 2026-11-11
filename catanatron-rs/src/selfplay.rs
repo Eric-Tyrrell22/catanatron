@@ -135,8 +135,8 @@ pub struct SelfPlayConfig {
     /// over the spots within `placement_margin` pips of the best (0 = off).
     pub placement_flatten: f32,
     /// Placement targets from short-horizon playouts instead of the PUCT
-    /// search (0 = off): at every initial-placement decision, each candidate
-    /// (settlements within `placement_margin` pips of the best, every road)
+    /// search (0 = off): at every initial settlement decision (roads keep the
+    /// search), each candidate spot within `placement_margin` pips of the best
     /// gets `placement_playouts` network-only playouts from the position
     /// after it until the game's turn counter reaches this value (or the
     /// game ends); the deciding player's value there, averaged, ranks the
@@ -1017,8 +1017,12 @@ fn play_out(
             _ => cfg.sims_fast,
         };
         player.config.root_noise = if full && cfg.gumbel_m == 0 { cfg.root_noise } else { 0.0 };
-        // Placement decisions by short-horizon playouts (`placement_horizon_turns`): no tree search.
-        let horizon = (placing && cfg.placement_horizon_turns > 0).then(|| horizon_targets(ctx, &game, &actions, rng));
+        // Settlement decisions of the opening by short-horizon playouts (`placement_horizon_turns`): no tree
+        // search. The opening roads keep the search: a road's horizon values differ by less than the playout
+        // noise, so their softmax came out nearly uniform (top probability 0.46 over 3 roads) and taught
+        // arbitrary roads, which cost 3 points against Ham within 10 iterations on Nov 11.
+        let horizon = (placing && cfg.placement_horizon_turns > 0 && matches!(actions[0].kind, ActionKind::BuildSettlement(_)))
+            .then(|| horizon_targets(ctx, &game, &actions, rng));
         let mut visits = match &horizon {
             Some((target, _, _, forwards)) => {
                 out.sims += forwards;
