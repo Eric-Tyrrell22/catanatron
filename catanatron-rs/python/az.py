@@ -46,8 +46,21 @@ AUX = 28  # catanatron::selfplay::AUX_TARGETS, checked against each self-play ba
 AUX_BASE = 8  # the game-level targets; the rest are per action type (--aux-extra-weight)
 
 
+def enough_space(path, need_bytes):
+    """False (with a warning) when the filesystem holding `path` can't take `need_bytes` plus a margin:
+    a failed write mid-save would otherwise kill the learner (it did once the disk filled with replay buffers)."""
+    import shutil
+    free = shutil.disk_usage(os.path.dirname(os.path.abspath(path))).free
+    if free < need_bytes + 512 * 2**20:
+        print(f"not saving {path}: {free / 2**30:.1f} GB free, need {need_bytes / 2**30:.1f} GB (free the disk: runs/free_disk.sh)", flush=True)
+        return False
+    return True
+
+
 def save(path, model, opt, meta):
     tmp = path + ".tmp"
+    if not enough_space(path, 4 * sum(p.numel() for p in model.parameters()) * 3):  # weights + Adam moments
+        return
     torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "meta": meta}, tmp)
     os.replace(tmp, path)
 
@@ -65,6 +78,8 @@ class Replay:
         oldest example, atomically."""
         data = {k: getattr(self, k)[:self.size] for k in self.FIELDS}
         data["oldest"] = self.next if self.size == self.capacity else 0
+        if not enough_space(path, sum(t.numel() * t.element_size() for t in data.values() if torch.is_tensor(t))):
+            return
         tmp = path + ".tmp"
         torch.save(data, tmp)
         os.replace(tmp, path)

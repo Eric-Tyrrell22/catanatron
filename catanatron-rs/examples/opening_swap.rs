@@ -85,7 +85,8 @@ fn main() {
                     let visits = m.search(&game).expect("search");
                     (0..visits.len()).max_by_key(|&j| visits[j]).unwrap()
                 } else {
-                    pick(net, &obs_space, &act_space, &game, opening, &mut rng, &mut obs, &mut scratch, &mut logits)
+                    // A network with an opening network attached ("main@opening") places with that one.
+                    pick(if opening { net.opening.as_deref().unwrap_or(&**net) } else { &**net }, &obs_space, &act_space, &game, opening, &mut rng, &mut obs, &mut scratch, &mut logits)
                 };
                 let action = game.playable_actions[i];
                 game.execute(action).expect("legal");
