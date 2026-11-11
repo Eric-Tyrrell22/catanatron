@@ -205,6 +205,7 @@ class Remote:
 
     def __init__(self, bucket, run, games_per_core, max_lag, max_shards, teachers=(), teacher_share=0.0, control_key=shards.CONTROL_KEY):
         self.control_key = control_key
+        self.launch = f"{int(time.time())}-{os.getpid()}"
         import boto3
         self.s3 = boto3.client("s3")
         self.bucket, self.run, self.games_per_core, self.max_lag = bucket, run, games_per_core, max_lag
@@ -238,9 +239,13 @@ class Remote:
                     self.s3.put_object(Bucket=self.bucket, Key=k, Body=f.read())
                 self.uploaded.add(k)
             pool.append(k)
+        # `launch` identifies this learner process: a relaunch of the same run reuses the iteration numbers and
+        # hence the model keys, and an actor that cached a key from the previous launch would keep serving
+        # those weights (which poisoned on4 on Nov 11); actors drop their cache when the token changes.
         control = {"run": self.run, "iter": iteration, "model": key, "pool": pool, "pool_share": pool_share,
                    "games_per_core": self.games_per_core, "obs_size": OBS, "action_size": ACTIONS,
-                   "self_play": self_play_kwargs, "teachers": self.teachers, "teacher_share": self.teacher_share}
+                   "self_play": self_play_kwargs, "teachers": self.teachers, "teacher_share": self.teacher_share,
+                   "launch": self.launch}
         if okey is not None:
             control["opening_model"] = okey
         self.s3.put_object(Bucket=self.bucket, Key=self.control_key, Body=json.dumps(control).encode())
@@ -358,6 +363,11 @@ def main():
                     help="at settlement decisions of the initial build phase, replace this share of the search's root prior with a "
                          "uniform prior over the plausible spots (within --placement-margin pips of the best), so search compares them "
                          "by value instead of amplifying the prior (0 = off, 1 = prior ignored at that root)")
+    ap.add_argument("--max-steps", type=int, default=0,
+                    help="cap on optimizer steps per iteration for the main network (0 = none): a burst of shards (a slow "
+                         "iteration, fast actors) otherwise multiplies the steps on near-on-policy data and the network can "
+                         "diverge (seen at ~1,300-1,600 steps/iteration at lr 5e-5); the surplus examples still enter the replay")
+    ap.add_argument("--max-opening-steps", type=int, default=0, help="the same cap for the opening network's steps per iteration")
     ap.add_argument("--placement-horizon-turns", type=int, default=0,
                     help="placement targets from short-horizon playouts instead of the placement search: each candidate spot "
                          "(within --placement-margin pips of the best; every road) gets --placement-playouts network-only playouts "
@@ -856,6 +866,8 @@ def main():
         # ---- Learn toward the search's visit counts and the results.
         t1 = time.time()
         steps = max(1, round(n * args.reuse / args.batch)) if replay.size >= args.min_replay else 0
+        if args.max_steps > 0:
+            steps = min(steps, args.max_steps)
         stats = [torch.zeros(6, device=device)] if steps == 0 else []
         model.train()
         for _ in range(steps):
@@ -888,6 +900,8 @@ def main():
         osteps, oloss_pi, oloss_v = 0, 0.0, 0.0
         if omodel is not None and n_open and oreplay.size >= args.opening_min_replay:
             osteps = max(1, round(n_open * args.opening_reuse / args.opening_batch))
+            if args.max_opening_steps > 0:
+                osteps = min(osteps, args.max_opening_steps)
             ostats = []
             omodel.train()
             for _ in range(osteps):

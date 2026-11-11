@@ -51,6 +51,7 @@ def main():
 
     cores = args.threads or os.cpu_count()
     nets = {}  # key -> bytes
+    launch_seen = None  # the control's launch token the cache belongs to
 
     # Compressing and uploading a shard takes seconds of one core; a worker
     # does it while the next batch plays. At most one batch waits.
@@ -89,6 +90,11 @@ def main():
             print("no control file yet; waiting for the learner", flush=True)
             time.sleep(30)
             continue
+        # A new learner process for this run (the control's launch token changed) republishes the same
+        # model keys with different weights: forget every cached network.
+        if control.get("launch") != launch_seen:
+            launch_seen = control.get("launch")
+            nets.clear()
         teachers = control.get("teachers", [])
         teacher = random.choice(teachers) if teachers and random.random() < control["teacher_share"] else None
         # Only networks still in use stay cached.
