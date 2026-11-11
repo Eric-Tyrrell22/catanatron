@@ -5,7 +5,7 @@
 //! forced node, so the picks of two policies can be compared under the same
 //! play. Keys as for players::from_key, e.g. "NN:spec.ctnn".
 //!
-//!   cargo run --release --example forced_pick -- <A key> <B key> <board seed> <node,node,...> [games] [threads]
+//!   cargo run --release --example forced_pick -- <A key> <B key> <board seed> <node,node,...|top:K> [games] [threads] [seed base]
 use catanatron::map::{build_map, MapType, NumberPlacement};
 use catanatron::parallel::{default_threads, par_map};
 use catanatron::players::from_key;
@@ -17,12 +17,29 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (a_key, b_key) = (args[1].clone(), args[2].clone());
     let board: u64 = args[3].parse().expect("board seed");
-    let nodes: Vec<u8> = args[4].split(',').map(|s| s.parse().expect("node id")).collect();
+    // "top:K" = the K pips-best legal first settlements of the board (the plausible picks).
+    let nodes: Vec<u8> = match args[4].strip_prefix("top:") {
+        Some(k) => {
+            let k: usize = k.parse().expect("top:K");
+            let map = build_map(MapType::Base, NumberPlacement::SpiralRandomCorner, &mut Rng::new(board));
+            let rules = GameConfig { map_type: MapType::Base, number_placement: NumberPlacement::SpiralRandomCorner, catan_map: Some(map.clone()), ..Default::default() };
+            let game = Game::new(&COLORS[..2], &rules);
+            let mut spots: Vec<(f64, u8)> = game.playable_actions.iter().filter_map(|a| match a.kind {
+                ActionKind::BuildSettlement(n) => Some((map.node_production[n as usize].iter().sum::<f64>(), n)),
+                _ => None,
+            }).collect();
+            spots.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            spots.iter().take(k).map(|&(_, n)| n).collect()
+        }
+        None => args[4].split(',').map(|s| s.parse().expect("node id")).collect(),
+    };
     let games: u64 = args.get(5).map_or(400, |s| s.parse().expect("games"));
     let threads: usize = args.get(6).map_or(default_threads(), |s| s.parse().expect("threads"));
+    // Optional dice-seed base, to relabel with independent games (the label-noise check).
+    let seed_base: u64 = args.get(7).map_or(960_000, |s| s.parse().expect("seed base"));
     for &forced in &nodes {
         let wins: Vec<u32> = par_map(games, threads, |g| {
-            let seed = 960_000 + g;
+            let seed = seed_base + g;
             let map = build_map(MapType::Base, NumberPlacement::SpiralRandomCorner, &mut Rng::new(board));
             let rules = GameConfig {
                 map_type: MapType::Base, vps_to_win: 15, discard_limit: 9, friendly_robber: FriendlyRobber::PublicPoints,

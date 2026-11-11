@@ -6,7 +6,7 @@
 //! value head to forced-play win rates.
 //!
 //!   cargo run --release --example forced_obs -- <board seed> <net key>
-use catanatron::encoding::ObservationSpace;
+use catanatron::encoding::{ActionSpace, ObservationSpace};
 use catanatron::map::{build_map, MapType, NumberPlacement};
 use catanatron::mcts::load_net;
 use catanatron::rng::Rng;
@@ -31,6 +31,19 @@ fn main() {
     let out = std::io::stdout();
     let mut out = std::io::BufWriter::new(out.lock());
     writeln!(out, "#obs_size {}", net.obs_size).unwrap();
+    // The pre-pick view (the first seat deciding) and each legal first pick's policy index, for policy targets.
+    let act = ActionSpace::new(&map);
+    obs_space.encode_into(&game.state, game.state.current_color(), &mut obs);
+    write!(out, "#pre").unwrap();
+    for v in &obs {
+        write!(out, " {v}").unwrap();
+    }
+    writeln!(out).unwrap();
+    for a in &game.playable_actions {
+        if let ActionKind::BuildSettlement(node) = a.kind {
+            writeln!(out, "#slot {node} {}", act.encode(&game.state, a).expect("encodable")).unwrap();
+        }
+    }
     for a in &game.playable_actions {
         if let ActionKind::BuildSettlement(node) = a.kind {
             let mut g = game.clone();

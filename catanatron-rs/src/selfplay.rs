@@ -134,6 +134,20 @@ pub struct SelfPlayConfig {
     /// Root-prior flattening at settlement decisions (`MctsConfig::placement_flatten`),
     /// over the spots within `placement_margin` pips of the best (0 = off).
     pub placement_flatten: f32,
+    /// Placement targets from short-horizon playouts instead of the PUCT
+    /// search (0 = off): at every initial-placement decision, each candidate
+    /// (settlements within `placement_margin` pips of the best, every road)
+    /// gets `placement_playouts` network-only playouts from the position
+    /// after it until the game's turn counter reaches this value (or the
+    /// game ends); the deciding player's value there, averaged, ranks the
+    /// candidates. The policy target is softmax(value / `placement_horizon_tau`)
+    /// over the candidates and the row's search value is the target-weighted
+    /// mean. Measured on the 100 expert boards: the turn-5 value ranks first
+    /// picks at Spearman 0.71 vs 0.63 for the one-ply value and 0.66 for
+    /// game outcomes.
+    pub placement_horizon_turns: u32,
+    pub placement_playouts: u32,
+    pub placement_horizon_tau: f32,
     /// With `fork_settlements_only`: relative weight of each settlement decision
     /// (0..3 in placement order) for choosing which one a placement fork replays
     /// (all 1 = cycle through them; the learner sets these from the forks'
@@ -337,6 +351,70 @@ fn execute_logged(
         }
     }
     execute_with_luck(game, action, &mut ctx.eval, ctx.reference, &ctx.cfg.utility)
+}
+
+/// Short-horizon playout targets for a placement decision (see
+/// `SelfPlayConfig::placement_horizon_turns`). Returns the target over
+/// `actions`, the target-weighted candidate value, the network's prior over
+/// `actions` and the forwards spent.
+fn horizon_targets(ctx: &mut Ctx, game: &Game, actions: &[Action], rng: &mut Rng) -> (Vec<f32>, f32, Vec<f32>, u64) {
+    let cfg = &ctx.cfg;
+    let me = game.state.current_color();
+    let n_players = game.state.colors.len() as f32;
+    let (prior, _) = ctx.eval.evaluate(game);
+    let map = &game.state.board.map;
+    let pips = |a: &Action| match a.kind {
+        ActionKind::BuildSettlement(n) => Some(map.node_production[n as usize].iter().sum::<f64>() as f32 * 36.0),
+        _ => None,
+    };
+    let best = actions.iter().filter_map(pips).fold(f32::MIN, f32::max);
+    let candidate: Vec<bool> = actions
+        .iter()
+        .map(|a| match pips(a) {
+            Some(p) => cfg.placement_margin <= 0.0 || p >= best - cfg.placement_margin,
+            None => true,
+        })
+        .collect();
+    let mut forwards = 1u64;
+    let mut values = vec![f32::NAN; actions.len()];
+    for (i, a) in actions.iter().enumerate() {
+        if !candidate[i] {
+            continue;
+        }
+        let mut sum = 0.0f32;
+        for _ in 0..cfg.placement_playouts {
+            let mut g = game.copy_without_history();
+            g.state.rng = Rng::new(rng.next_u64());
+            g.execute(*a).expect("candidate is legal");
+            while !g.is_over() && g.state.num_turns < cfg.placement_horizon_turns {
+                let legal = g.playable_actions.clone();
+                let pick = if legal.len() == 1 {
+                    legal[0]
+                } else {
+                    let (p, _) = ctx.eval.evaluate(&g);
+                    forwards += 1;
+                    legal[(0..p.len()).max_by(|&x, &y| p[x].total_cmp(&p[y])).unwrap()]
+                };
+                g.execute(pick).expect("legal");
+            }
+            sum += if g.is_over() {
+                if g.winning_color() == Some(me) { 1.0 } else { -1.0 / (n_players - 1.0) }
+            } else {
+                let (_, v) = ctx.eval.evaluate(&g);
+                forwards += 1;
+                if g.state.current_color() == me { v } else { -v / (n_players - 1.0) }
+            };
+        }
+        values[i] = sum / cfg.placement_playouts as f32;
+    }
+    let top = values.iter().copied().filter(|v| !v.is_nan()).fold(f32::MIN, f32::max);
+    let mut target: Vec<f32> = values.iter().map(|v| if v.is_nan() { 0.0 } else { ((v - top) / cfg.placement_horizon_tau).exp() }).collect();
+    let z: f32 = target.iter().sum();
+    for t in target.iter_mut() {
+        *t /= z;
+    }
+    let q = target.iter().zip(&values).filter(|(_, v)| !v.is_nan()).map(|(t, v)| t * v).sum();
+    (target, q, prior, forwards)
 }
 
 fn completed_q_target(stats: &[(f32, u32, Option<f32>)], root_value: f32, bound: f32) -> Vec<f32> {
@@ -939,8 +1017,19 @@ fn play_out(
             _ => cfg.sims_fast,
         };
         player.config.root_noise = if full && cfg.gumbel_m == 0 { cfg.root_noise } else { 0.0 };
-        let mut visits = player.search(&game)?;
-        out.sims += player.config.simulations as u64;
+        // Placement decisions by short-horizon playouts (`placement_horizon_turns`): no tree search.
+        let horizon = (placing && cfg.placement_horizon_turns > 0).then(|| horizon_targets(ctx, &game, &actions, rng));
+        let mut visits = match &horizon {
+            Some((target, _, _, forwards)) => {
+                out.sims += forwards;
+                target.iter().map(|t| (t * 1000.0).round() as u32).collect()
+            }
+            None => {
+                let v = player.search(&game)?;
+                out.sims += player.config.simulations as u64;
+                v
+            }
+        };
         // Surprise of the fast search: KL(visit distribution || network prior).
         let mut fast_kl = 0.0f32;
         if !full && (cfg.kl_escalate || cfg.admit_kl > 0.0) {
@@ -997,18 +1086,24 @@ fn play_out(
             obs_space.encode_into(&game.state, mover, &mut out.obs[start..]);
             act_space.fill_mask(&game.state, &actions, &mut legal);
             out.mask.extend(legal.iter().map(|&m| m as u8));
-            let (stats, root_value) = player.root_stats();
-            let target = completed_q_target(&stats, root_value, cfg.utility.bound());
-            let visited: u32 = stats.iter().map(|s| s.1).sum();
-            let q_sum: f32 = stats.iter().filter_map(|&(_, n, q)| q.map(|q| q * n as f32)).sum();
-            out.q.push(if visited > 0 { q_sum / visited as f32 } else { root_value });
-            let prior_sum: f32 = stats.iter().map(|s| s.0).sum();
+            let (target, q_value, priors): (Vec<f32>, f32, Vec<f32>) = match &horizon {
+                Some((target, q, prior, _)) => (target.clone(), *q, prior.clone()),
+                None => {
+                    let (stats, root_value) = player.root_stats();
+                    let target = completed_q_target(&stats, root_value, cfg.utility.bound());
+                    let visited: u32 = stats.iter().map(|s| s.1).sum();
+                    let q_sum: f32 = stats.iter().filter_map(|&(_, n, q)| q.map(|q| q * n as f32)).sum();
+                    (target, if visited > 0 { q_sum / visited as f32 } else { root_value }, stats.iter().map(|s| s.0).collect())
+                }
+            };
+            out.q.push(q_value);
+            let prior_sum: f32 = priors.iter().sum();
             out.surprise.push(
-                stats
+                priors
                     .iter()
                     .zip(&target)
                     .filter(|&(_, &t)| t > 0.0)
-                    .map(|(&(p, _, _), &t)| t * (t / (p / prior_sum).max(1e-30)).ln())
+                    .map(|(&p, &t)| t * (t / (p / prior_sum).max(1e-30)).ln())
                     .sum::<f32>()
                     .max(0.0),
             );
@@ -1036,7 +1131,7 @@ fn play_out(
             }
         }
 
-        let pick = if let Some(choice) = player.gumbel_choice() {
+        let pick = if let Some(choice) = player.gumbel_choice().filter(|_| horizon.is_none()) {
             choice
         } else if searched[seat] < cfg.temp_moves && total > 0 {
             let weights: Vec<f32> = visits.iter().map(|&v| v as f32).collect();

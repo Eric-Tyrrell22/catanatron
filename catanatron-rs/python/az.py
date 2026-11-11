@@ -358,6 +358,14 @@ def main():
                     help="at settlement decisions of the initial build phase, replace this share of the search's root prior with a "
                          "uniform prior over the plausible spots (within --placement-margin pips of the best), so search compares them "
                          "by value instead of amplifying the prior (0 = off, 1 = prior ignored at that root)")
+    ap.add_argument("--placement-horizon-turns", type=int, default=0,
+                    help="placement targets from short-horizon playouts instead of the placement search: each candidate spot "
+                         "(within --placement-margin pips of the best; every road) gets --placement-playouts network-only playouts "
+                         "to this game turn and the deciding player's value there, averaged, ranks the candidates (0 = off). "
+                         "On the 100 expert boards the turn-5 value ranks first picks at Spearman 0.71 vs 0.63 one-ply, 0.66 outcomes")
+    ap.add_argument("--placement-playouts", type=int, default=12, help="playouts per candidate for --placement-horizon-turns")
+    ap.add_argument("--placement-horizon-tau", type=float, default=0.2,
+                    help="softmax temperature over the candidates' horizon values for the policy target (value units)")
     ap.add_argument("--regret-forks", action="store_true",
                     help="with --fork-settlements-only: weight the choice of which settlement decision a placement fork replays by "
                          "the running mean regret of its forks (how much alternatives beat the network's pick), so forks go where "
@@ -694,7 +702,7 @@ def main():
         temp_moves=args.temp_moves, root_noise=args.root_noise, dirichlet_alpha=args.alpha, c_puct=args.c_puct,
         fpu_reduction=args.fpu, escalate_gap=args.escalate_gap, entropy_budget=args.entropy_budget, kl_escalate=args.kl_escalate, admit_kl=args.admit_kl, focus_sims=args.focus_sims, endgame_vp=args.endgame_vp,
         endgame_branches=args.endgame_branches, opening_branches=args.opening_branches,
-        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, fork_settlements_only=args.fork_settlements_only, placement_margin=args.placement_margin, placement_flatten=args.placement_flatten, placement_fork_weights=list(meta.get("fork_weights_init", [1.0, 1.0, 1.0, 1.0])), move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
+        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, fork_settlements_only=args.fork_settlements_only, placement_margin=args.placement_margin, placement_flatten=args.placement_flatten, placement_horizon_turns=args.placement_horizon_turns, placement_playouts=args.placement_playouts, placement_horizon_tau=args.placement_horizon_tau, placement_fork_weights=list(meta.get("fork_weights_init", [1.0, 1.0, 1.0, 1.0])), move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
         speed_weight=args.speed_weight, speed_turns=args.speed_turns, board=board, **rules_from_args(args))
     # Random-opponent games stop for good once search beats the random bot in
     # every evaluation game with none capped (recorded in meta, so a resumed
