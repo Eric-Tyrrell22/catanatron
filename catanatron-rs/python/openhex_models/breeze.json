@@ -1,0 +1,8 @@
+{
+  "bot": "Breeze",
+  "source": "runs/oh2/snap_000260.ctnn",
+  "iteration": 260,
+  "run": "oh2",
+  "frozen_at": "2026-11-08 08:02",
+  "think_ms": 10000
+}

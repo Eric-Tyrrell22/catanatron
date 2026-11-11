@@ -1,0 +1,56 @@
+# Remote self-play actor (python/actor.py), for linux/amd64 and linux/arm64.
+# Built by infra/push.sh. Everything is compiled and fetched in a build stage
+# on the build machine (cross-compiling for arm64), so the final images need
+# no RUN steps and no emulation.
+#   amd64: target-cpu znver4 (Zen 4 c7a/m7a, Zen 5 c8a/m8a)
+#   arm64: target-cpu neoverse-v1 (Graviton3 and later)
+FROM --platform=$BUILDPLATFORM rust:1.91-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip gcc-aarch64-linux-gnu libc6-dev-arm64-cross unzip \
+    && pip3 install --break-system-packages "maturin>=1.8,<2" \
+    && rustup target add aarch64-unknown-linux-gnu
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src src
+COPY python/Cargo.toml python/pyproject.toml python/
+COPY python/src python/src
+ARG TARGETARCH
+ARG AMD64_CPU=znver4
+ARG ARM64_CPU=neoverse-v1
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+# With an explicit --target, RUSTFLAGS apply to the output only, not to build
+# scripts (which run here, on the build machine's CPU).
+RUN case "$TARGETARCH" in \
+      amd64) TRIPLE=x86_64-unknown-linux-gnu; CPU=$AMD64_CPU; PLAT=manylinux2014_x86_64 ;; \
+      arm64) TRIPLE=aarch64-unknown-linux-gnu; CPU=$ARM64_CPU; PLAT=manylinux2014_aarch64 ;; \
+      *) echo "unsupported arch $TARGETARCH" && exit 1 ;; \
+    esac \
+    && RUSTFLAGS="-C target-cpu=$CPU" maturin build --release --target $TRIPLE -m python/Cargo.toml -o /wheels \
+    && mkdir /deps && unzip -q /wheels/*.whl -d /deps \
+    && pip3 install --break-system-packages --target /deps --platform $PLAT --implementation cp \
+       --python-version 3.12 --only-binary=:all: numpy boto3
+
+# The colonizing-pig bot (github.com/TheWeiHu/colonizing-pig) for benchmark
+# matches (python/pig_match.py): fetched at a pinned commit, not vendored,
+# and built for the target platform with our driver (bench/pig/pigd.cpp,
+# which includes its engine from /external/colonizing-pig).
+FROM debian:bookworm AS pig
+RUN apt-get update && apt-get install -y --no-install-recommends g++ git ca-certificates
+ARG PIG_COMMIT=aec1330aa443304841688ff41af4524dfb90c4a0
+RUN git clone https://github.com/TheWeiHu/colonizing-pig.git /external/colonizing-pig \
+    && git -C /external/colonizing-pig checkout --quiet $PIG_COMMIT
+COPY bench/pig/pigd.cpp /src/bench/pig/pigd.cpp
+RUN cd /src/bench/pig && E=/external/colonizing-pig/engine \
+    && g++ -std=c++17 -O3 -ffp-contract=off -pthread -fno-builtin-catan pigd.cpp $E/catan.cpp $E/agent.cpp $E/graph.cpp -o pigd
+
+FROM python:3.12-slim
+COPY --from=build /deps /usr/local/lib/python3.12/site-packages/
+WORKDIR /app
+COPY python/actor.py python/shards.py python/bench.py ./
+COPY bench/model.ctnn bench/parity.npz bench/
+# Pig matches: python pig_match.py ... --pig-repo /app/pig --pigd /app/pig/pigd
+COPY python/pig_match.py ./
+COPY python/openhex_models/ham.ctnn models/
+COPY --from=pig /src/bench/pig/pigd pig/pigd
+COPY --from=pig /external/colonizing-pig/weights pig/weights
+ENV PYTHONUNBUFFERED=1 OPENBLAS_NUM_THREADS=1
+CMD ["python", "actor.py"]

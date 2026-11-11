@@ -1,0 +1,7 @@
+{
+  "bot": "Spook",
+  "source": "runs/oh1/snap_000180.ctnn",
+  "iteration": 180,
+  "frozen_at": "2026-11-08 00:19",
+  "think_ms": 10000
+}

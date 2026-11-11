@@ -1,0 +1,6 @@
+# Compile for the CPU doing the build (AVX2/AVX-512/FMA/F16C where available).
+# The network evaluation in Rust needs F16C and FMA (see src/nn.rs).
+# Binaries built this way may not run on older CPUs: build on each machine.
+[build]
+rustflags = ["-C", "target-cpu=native"]
+rustdocflags = ["-C", "target-cpu=native"]

@@ -1,0 +1,11 @@
+{
+  "app": "npx ts-node --prefer-ts-exts bin/app.ts",
+  "context": {
+    "instanceTypes": "m8a.metal-48xl,c8a.metal-48xl,c8a.16xlarge,c7a.16xlarge",
+    "maxInstances": 4,
+    "budgetUsd": 10,
+    "armInstanceTypes": "r8g.metal-48xl,c8gd.metal-48xl,m9gd.metal-48xl,c8g.48xlarge",
+    "armMaxInstances": 1,
+    "spotMaxPriceUsd": 1.5
+  }
+}

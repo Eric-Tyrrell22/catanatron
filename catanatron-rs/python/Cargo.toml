@@ -1,0 +1,14 @@
+[package]
+name = "catanatron-py"
+version = "0.1.0"
+edition = "2021"
+description = "Python bindings for the catanatron Rust engine (batched RL environment)"
+license = "GPL-3.0"
+
+[lib]
+name = "catanatron_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+catanatron = { path = ".." }
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py311"] }

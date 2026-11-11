@@ -1,0 +1,19 @@
+# builds and environments
+/target
+/python/.venv
+/python/__pycache__
+/python/runs/__pycache__
+/infra/node_modules
+/infra/cdk.out
+# run data (replays, logs, snapshots): gigabytes, lives in python/runs
+/python/runs/*
+!/python/runs/*.py
+!/python/runs/*.sh
+!/python/runs/*.html
+!/python/runs/*.json
+!/python/runs/boards/
+# model weights (tens of MB each; Dockerfile.actor copies them from the main checkout)
+*.ctnn
+*.pt
+# secrets
+/python/openhex_keys.json

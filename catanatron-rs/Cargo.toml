@@ -1,0 +1,23 @@
+[package]
+name = "catanatron"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of the catanatron core game engine"
+license = "GPL-3.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "catanatron-play"
+path = "src/bin/play.rs"
+
+[dependencies]
+rayon = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[workspace]
+members = [".", "python"]

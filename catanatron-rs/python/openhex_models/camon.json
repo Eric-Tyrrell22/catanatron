@@ -1,0 +1,8 @@
+{
+  "bot": "Camon",
+  "source": "runs/oh1/model.pt",
+  "iteration": 59,
+  "games": 30208,
+  "frozen_at": "2026-11-07 19:59",
+  "think_ms": 10000
+}

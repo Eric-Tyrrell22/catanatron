@@ -1,0 +1,37 @@
+# PPO trainer (python/train.py via python/ppo_remote.py) for actor hosts:
+# CPU PyTorch, linux/arm64 and linux/amd64. Like Dockerfile.actor, everything
+# is compiled and fetched in a build stage on the build machine, so the final
+# images need no RUN steps.
+FROM --platform=$BUILDPLATFORM rust:1.91-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip gcc-aarch64-linux-gnu libc6-dev-arm64-cross unzip \
+    && pip3 install --break-system-packages "maturin>=1.8,<2" \
+    && rustup target add aarch64-unknown-linux-gnu
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src src
+COPY python/Cargo.toml python/pyproject.toml python/
+COPY python/src python/src
+ARG TARGETARCH
+ARG AMD64_CPU=znver4
+ARG ARM64_CPU=neoverse-v1
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+RUN case "$TARGETARCH" in \
+      amd64) TRIPLE=x86_64-unknown-linux-gnu; CPU=$AMD64_CPU; PLAT=manylinux_2_28_x86_64 ;; \
+      arm64) TRIPLE=aarch64-unknown-linux-gnu; CPU=$ARM64_CPU; PLAT=manylinux_2_28_aarch64 ;; \
+      *) echo "unsupported arch $TARGETARCH" && exit 1 ;; \
+    esac \
+    && RUSTFLAGS="-C target-cpu=$CPU" maturin build --release --target $TRIPLE -m python/Cargo.toml -o /wheels \
+    && mkdir /deps && unzip -q /wheels/*.whl -d /deps \
+    && pip3 install --break-system-packages --target /deps --platform $PLAT --implementation cp \
+       --python-version 3.12 --only-binary=:all: numpy boto3 \
+    && pip3 install --break-system-packages --target /deps --platform $PLAT --implementation cp \
+       --python-version 3.12 --only-binary=:all: --no-deps --index-url https://download.pytorch.org/whl/cpu torch \
+    && pip3 install --break-system-packages --target /deps --platform $PLAT --implementation cp \
+       --python-version 3.12 --only-binary=:all: --no-deps filelock typing-extensions sympy mpmath networkx jinja2 MarkupSafe fsspec
+
+FROM python:3.12-slim
+COPY --from=build /deps /usr/local/lib/python3.12/site-packages/
+WORKDIR /app
+COPY python/train.py python/catanatron_env.py python/export.py python/model.py python/ppo_remote.py ./
+ENV PYTHONUNBUFFERED=1 OPENBLAS_NUM_THREADS=1
+CMD ["python", "ppo_remote.py"]
