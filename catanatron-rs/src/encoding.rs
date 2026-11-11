@@ -322,8 +322,10 @@ pub struct ObservationSpace {
     extras: bool,
     /// Settlement spots and trade rates (see `ObsFeatures::spots`).
     spots: bool,
-    /// Reach, contention and affordability (see `ObsFeatures::reach`), last.
+    /// Reach, contention and affordability (see `ObsFeatures::reach`).
     reach: bool,
+    /// Spot structure (see `ObsFeatures::structure`), last.
+    structure: bool,
     num_land_nodes: usize,
     /// Land node => its port, if any (0..5 resources, 5 = 3:1). Fixed per map.
     node_port: Vec<Option<usize>>,
@@ -395,6 +397,33 @@ pub struct ObsFeatures {
     /// (/ 30), and for road, settlement, city and dev card: can build now,
     /// and exactly one card short.
     pub reach: bool,
+    /// Spot structure, board-constant (what the board specialists' first
+    /// picks track): the board's pips per resource (/ 20); then per land node
+    /// (`STRUCT_PER_NODE`) its share of the board's pips in each resource,
+    /// their sum (/ 2), the pips of its weakest resource among wood+brick
+    /// (roads), ore+wheat (cities) and wood+brick+sheep+wheat (settlements)
+    /// (/ 5), its 6s and 8s (/ 2), duplicated numbers (/ 2), tiles (/ 3) and
+    /// whether it is coastal; then one constant marker.
+    pub structure: bool,
+}
+
+/// Per land node entries of the structure block.
+pub const STRUCT_PER_NODE: usize = 5 + 1 + 3 + 4;
+/// Board-level entries of the structure block (before the nodes): pips per
+/// resource (/ 20), the scarcest and richest resource's pips and their gap
+/// (/ 20), 2:1 ports (/ 5), 3:1 ports (/ 4), tiles numbered 6 or 8 (/ 4).
+pub const STRUCT_BOARD: usize = 5 + 6;
+/// Constant markers closing the block (three, so its size coincides with no
+/// other combination of blocks on any map).
+const STRUCT_MARKERS: usize = 3;
+
+fn struct_len(num_land_nodes: usize) -> usize {
+    STRUCT_BOARD + num_land_nodes * STRUCT_PER_NODE + STRUCT_MARKERS
+}
+
+/// Start of the structure block, if present.
+pub fn struct_offset_of(obs: &ObservationSpace) -> Option<usize> {
+    obs.structure.then(|| obs.size - struct_len(obs.num_land_nodes))
 }
 
 /// Per land node entries of the reach block.
@@ -412,12 +441,12 @@ fn reach_len(num_land_nodes: usize) -> usize {
 
 /// Start of the reach block, if present.
 pub fn reach_offset_of(obs: &ObservationSpace) -> Option<usize> {
-    obs.reach.then(|| obs.size - reach_len(obs.num_land_nodes))
+    obs.reach.then(|| obs.size - reach_len(obs.num_land_nodes) - if obs.structure { struct_len(obs.num_land_nodes) } else { 0 })
 }
 
 impl ObsFeatures {
     pub const ALL: ObsFeatures =
-        ObsFeatures { dice: true, dice_history: true, hands: true, devs: true, extras: true, spots: true, reach: true };
+        ObsFeatures { dice: true, dice_history: true, hands: true, devs: true, extras: true, spots: true, reach: true, structure: true };
 }
 
 /// Per land node entries of the spots block.
@@ -494,15 +523,16 @@ impl ObservationSpace {
     /// layout plus whichever optional blocks account for the extra inputs.
     pub fn for_network(map: &CatanMap, obs_size: usize) -> ObservationSpace {
         for k in 0..32 {
-            for (spots, reach) in [(false, false), (true, false), (true, true), (false, true)] {
+            for k2 in 0..8 {
                 let f = ObsFeatures {
                     dice: k & 1 != 0,
                     hands: k & 2 != 0,
                     devs: k & 4 != 0,
                     extras: k & 8 != 0,
                     dice_history: k & 16 != 0,
-                    spots,
-                    reach,
+                    spots: k2 & 1 != 0,
+                    reach: k2 & 2 != 0,
+                    structure: k2 & 4 != 0,
                 };
                 if f.dice_history && !f.dice {
                     continue;
@@ -522,16 +552,20 @@ impl ObservationSpace {
 
     /// Start of the extras block, if present.
     pub fn extras_offset(&self, map: &CatanMap) -> Option<usize> {
-        self.extras.then(|| self.size - extras_len(map) - self.spots_size() - self.reach_size())
+        self.extras.then(|| self.size - extras_len(map) - self.spots_size() - self.reach_size() - self.struct_size())
     }
 
     /// Start of the spots block, if present (its per-node part first).
     pub fn spots_offset(&self) -> Option<usize> {
-        self.spots.then(|| self.size - self.spots_size() - self.reach_size())
+        self.spots.then(|| self.size - self.spots_size() - self.reach_size() - self.struct_size())
     }
 
     fn reach_size(&self) -> usize {
         if self.reach { reach_len(self.num_land_nodes) } else { 0 }
+    }
+
+    fn struct_size(&self) -> usize {
+        if self.structure { struct_len(self.num_land_nodes) } else { 0 }
     }
 
     fn spots_size(&self) -> usize {
@@ -539,7 +573,7 @@ impl ObservationSpace {
     }
 
     pub fn with_features(map: &CatanMap, f: ObsFeatures) -> ObservationSpace {
-        let ObsFeatures { dice, dice_history, hands, devs, extras, spots, reach } = f;
+        let ObsFeatures { dice, dice_history, hands, devs, extras, spots, reach, structure } = f;
         assert!(dice || !dice_history, "the dice-history block comes with the dice block");
         let num_land_nodes = map.land_nodes.iter().filter(|&&x| x).count();
         let land_edges: Vec<usize> = (0..map.edges.len()).filter(|&i| map.land_edge[i]).collect();
@@ -565,8 +599,9 @@ impl ObservationSpace {
             + if devs { DEV_FEATURES } else { 0 }
             + if extras { extras_len(map) } else { 0 }
             + if spots { spots_len(num_land_nodes) } else { 0 }
-            + if reach { reach_len(num_land_nodes) } else { 0 };
-        ObservationSpace { dice, dice_history, hands, devs, extras, spots, reach, num_land_nodes, node_port, land_edges, size }
+            + if reach { reach_len(num_land_nodes) } else { 0 }
+            + if structure { struct_len(num_land_nodes) } else { 0 };
+        ObservationSpace { dice, dice_history, hands, devs, extras, spots, reach, structure, num_land_nodes, node_port, land_edges, size }
     }
 
     pub fn len(&self) -> usize {
@@ -928,6 +963,63 @@ impl ObservationSpace {
             w.put(|| "REACH_BLOCK".to_string(), 1.0);
         }
 
+        if self.structure {
+            // Board-constant spot structure: what the board specialists' first picks track.
+            let map = &b.map;
+            let pips_of = |num: u8| (6 - (7 - num as i32).abs()).max(0) as f32;
+            let mut board_pips = [0.0f32; 5];
+            for &ti in &map.land_tiles {
+                let t = &map.tiles[ti];
+                if let (Some(r), Some(num)) = (t.resource(), t.number()) {
+                    board_pips[r.idx()] += pips_of(num);
+                }
+            }
+            for r in 0..5 {
+                w.put(|| format!("BOARD_{}_PIPS", RESOURCES[r].name()), board_pips[r] / 20.0);
+            }
+            let (lo, hi) = (board_pips.iter().copied().fold(f32::INFINITY, f32::min), board_pips.iter().copied().fold(0.0, f32::max));
+            w.put(|| "BOARD_SCARCEST_PIPS".to_string(), lo / 20.0);
+            w.put(|| "BOARD_RICHEST_PIPS".to_string(), hi / 20.0);
+            w.put(|| "BOARD_PIPS_GAP".to_string(), (hi - lo) / 20.0);
+            w.put(|| "BOARD_PORTS_2TO1".to_string(), map.port_nodes.iter().filter(|(r, _)| r.is_some()).count() as f32 / 5.0);
+            w.put(|| "BOARD_PORTS_3TO1".to_string(), map.port_nodes.iter().filter(|(r, _)| r.is_none()).count() as f32 / 4.0);
+            w.put(|| "BOARD_RED_TILES".to_string(), map.land_tiles.iter().filter(|&&ti| matches!(map.tiles[ti].number(), Some(6) | Some(8))).count() as f32 / 4.0);
+            for nd in 0..self.num_land_nodes {
+                let mut p = [0.0f32; 5];
+                let mut nums: Vec<u8> = Vec::new();
+                let tiles = map.adjacent_tiles[nd].len();
+                for &ti in &map.adjacent_tiles[nd] {
+                    let t = &map.tiles[ti];
+                    if let (Some(r), Some(num)) = (t.resource(), t.number()) {
+                        p[r.idx()] += pips_of(num);
+                        nums.push(num);
+                    }
+                }
+                let mut scarce = 0.0;
+                for r in 0..5 {
+                    let share = p[r] / board_pips[r].max(1.0);
+                    scarce += share;
+                    w.put(|| format!("STRUCT{nd}_{}_SHARE", RESOURCES[r].name()), share);
+                }
+                w.put(|| format!("STRUCT{nd}_SCARCE"), scarce / 2.0);
+                // Resource indices: wood 0, brick 1, sheep 2, wheat 3, ore 4 (types::RESOURCES).
+                w.put(|| format!("STRUCT{nd}_ROAD_PAIR"), p[0].min(p[1]) / 5.0);
+                w.put(|| format!("STRUCT{nd}_CITY_PAIR"), p[4].min(p[3]) / 5.0);
+                w.put(|| format!("STRUCT{nd}_SETTLE_SET"), p[0].min(p[1]).min(p[2]).min(p[3]) / 5.0);
+                let red = nums.iter().filter(|&&k| k == 6 || k == 8).count();
+                let mut distinct = nums.clone();
+                distinct.sort_unstable();
+                distinct.dedup();
+                w.put(|| format!("STRUCT{nd}_RED"), red as f32 / 2.0);
+                w.put(|| format!("STRUCT{nd}_DUP_NUMBERS"), (nums.len() - distinct.len()) as f32 / 2.0);
+                w.put(|| format!("STRUCT{nd}_TILES"), tiles as f32 / 3.0);
+                w.put(|| format!("STRUCT{nd}_COAST"), (tiles < 3) as u8 as f32);
+            }
+            for k in 0..STRUCT_MARKERS {
+                w.put(|| format!("STRUCT_BLOCK_{k}"), 1.0);
+            }
+        }
+
         w.finish(self.size);
     }
 }
@@ -1136,6 +1228,15 @@ pub fn symmetries(map: &CatanMap, obs: &ObservationSpace, act: &ActionSpace) -> 
                 for (n, &m) in node.iter().enumerate() {
                     for j in 0..REACH_PER_NODE {
                         o[o_r + m * REACH_PER_NODE + j] = o_r + n * REACH_PER_NODE + j;
+                    }
+                }
+            }
+            if let Some(o_t) = struct_offset_of(obs) {
+                // Board totals and the marker are symmetric; the per-node entries move with the nodes.
+                let base = o_t + STRUCT_BOARD;
+                for (n, &m) in node.iter().enumerate() {
+                    for j in 0..STRUCT_PER_NODE {
+                        o[base + m * STRUCT_PER_NODE + j] = base + n * STRUCT_PER_NODE + j;
                     }
                 }
             }

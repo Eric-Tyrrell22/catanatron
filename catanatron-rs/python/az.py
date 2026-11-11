@@ -435,6 +435,13 @@ def main():
     ap.add_argument("--reach-features", action="store_true",
                     help="network sees per-node road reach for both sides, secure/contested spots, far spots, a greedy "
                          "settle plan and affordability (the relational quantities an expansion plan is made of)")
+    ap.add_argument("--structure-features", action="store_true",
+                    help="network sees the board's pips per resource and, per spot, its share of each resource's supply, "
+                         "its road/city/settlement resource pairs, 6s and 8s, duplicate numbers, tile count and coast "
+                         "(what the board specialists' first picks track; board-constant)")
+    ap.add_argument("--opening-init", default=None,
+                    help="with --opening-net: start the opening network from this omodel.pt (inputs widened with zero weights "
+                         "for new feature blocks) instead of from a copy of the main network")
     ap.add_argument("--sibling-labels", action="store_true",
                     help="a position's value target is the mean result over every continuation sharing it (main game, "
                          "opening branches, placement and move forks from the search target), luck-adjusted each")
@@ -457,12 +464,14 @@ def main():
 
     probe = VecEnv(1, ["R"], opponent_hands=args.opponent_hands, opponent_devs=args.opponent_devs,
                    extra_info=args.extra_info, spot_features=args.spot_features, reach_features=args.reach_features,
-                   **rules_from_args(args))
+                   structure_features=args.structure_features, **rules_from_args(args))
     OBS, ACTIONS = probe.obs_size, probe.action_size
     extra_in = 0
     if args.reach_lr_mult > 0:
         if not args.reach_features:
             raise SystemExit("--reach-lr-mult needs --reach-features")
+        if args.structure_features:
+            raise SystemExit("--reach-lr-mult routes the trailing inputs; the structure block comes after the reach block")
         extra_in = OBS - VecEnv(1, ["R"], opponent_hands=args.opponent_hands, opponent_devs=args.opponent_devs,
                                 extra_info=args.extra_info, spot_features=args.spot_features, **rules_from_args(args)).obs_size
     torch.manual_seed(args.seed)
@@ -582,10 +591,13 @@ def main():
     omodel, oopt, ometa, ockpt_path = None, None, None, os.path.join(run_dir, "omodel.pt")
     if args.opening_net:
         ohidden, olayers = args.opening_hidden or args.hidden, args.opening_layers or args.layers
-        ock = None
+        ock, oinit = None, None
         if args.resume and os.path.exists(ockpt_path):
             ock = torch.load(ockpt_path, map_location=device)
             ohidden, olayers = ock["meta"]["hidden"], ock["meta"]["layers"]
+        elif args.opening_init:
+            oinit = torch.load(args.opening_init, map_location=device)
+            ohidden, olayers = oinit["meta"].get("hidden", ohidden), oinit["meta"].get("layers", olayers)
         omodel = Policy(OBS, ACTIONS, hidden=ohidden, layers=olayers, aux=0, spots=spot_tables, extra_in=extra_in).to(device)
         olr = args.opening_lr or args.lr
         oextra = [p for n, p in omodel.named_parameters() if n.endswith("extra_weight")]
@@ -601,6 +613,18 @@ def main():
                 g["lr"] = lr
             ometa = ock["meta"]
             print(f"resumed the opening network ({olayers}x{ohidden}) at {ometa['steps']:,} steps", flush=True)
+        elif oinit is not None:
+            # An earlier run's opening network; new trailing input blocks get zero weights (same outputs to start).
+            state = {k: v for k, v in oinit["model"].items() if not k.startswith("aux.")}
+            w = state["trunk.0.weight"]
+            if w.shape[1] < OBS - extra_in:
+                state["trunk.0.weight"] = torch.cat([w, w.new_zeros(w.shape[0], OBS - extra_in - w.shape[1])], 1)
+                print(f"opening network: widened inputs {w.shape[1]} -> {OBS - extra_in} (new weights zero)", flush=True)
+            omodel.load_state_dict(state)
+            ometa = {"steps": oinit["meta"].get("steps", 0), "examples": oinit["meta"].get("examples", 0), "obs_size": OBS,
+                     "action_size": ACTIONS, "aux": 0, "hidden": ohidden, "layers": olayers, "spot_branch": spot_tables is not None,
+                     "extra_in": extra_in, "init": args.opening_init}
+            print(f"opening network from {args.opening_init} ({olayers}x{ohidden}, {ometa['steps']:,} steps so far), lr {olr:g}", flush=True)
         else:
             # A copy of the main network as it is now (a resumed run without one
             # gets a copy of its current network), so the openings start unchanged.

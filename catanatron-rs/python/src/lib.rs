@@ -132,7 +132,7 @@ struct PyVecEnv {
 impl PyVecEnv {
     #[new]
     #[pyo3(signature = (num_envs, opponents, seed=0, threads=0, map_type="BASE", vps_to_win=10, vp_reward=0.0,
-                        discard_limit=7, friendly_robber="off", dice="fair", numbers="spiral", opponent_hands=false, opponent_devs=false, extra_info=false, spot_features=false, reach_features=false))]
+                        discard_limit=7, friendly_robber="off", dice="fair", numbers="spiral", opponent_hands=false, opponent_devs=false, extra_info=false, spot_features=false, reach_features=false, structure_features=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         num_envs: usize,
@@ -151,6 +151,7 @@ impl PyVecEnv {
         extra_info: bool,
         spot_features: bool,
         reach_features: bool,
+        structure_features: bool,
     ) -> PyResult<Self> {
         let rules = game_rules(map_type, vps_to_win, discard_limit, friendly_robber, dice, numbers)?;
         let config = VecEnvConfig {
@@ -170,6 +171,7 @@ impl PyVecEnv {
             extra_info,
             spot_features,
             reach_features,
+            structure_features,
         };
         Ok(PyVecEnv { inner: VecEnv::new(config).map_err(PyValueError::new_err)? })
     }

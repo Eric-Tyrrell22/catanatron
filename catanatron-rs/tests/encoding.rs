@@ -312,7 +312,8 @@ fn observation_hides_opponent_dev_card_types() {
         let space = ObservationSpace::with_features(&map, ObsFeatures::ALL);
         assert_eq!(space.len(), ObservationSpace::new(&map).len() + 12 + catanatron::encoding::DICE_HISTORY_FEATURES + 15 + DEV_FEATURES + 19 * 11 + 4 + 6
             + 54 * catanatron::encoding::SPOT_PER_NODE + 4 * catanatron::encoding::SPOT_PER_PLAYER
-            + 54 * catanatron::encoding::REACH_PER_NODE + 4 * catanatron::encoding::REACH_PER_PLAYER + 1);
+            + 54 * catanatron::encoding::REACH_PER_NODE + 4 * catanatron::encoding::REACH_PER_PLAYER + 1
+            + catanatron::encoding::STRUCT_BOARD + 54 * catanatron::encoding::STRUCT_PER_NODE + 3);
         let mut p = bots(2, seed);
         while !g.is_over() {
             let me = g.state.current_color();
@@ -346,7 +347,7 @@ fn observation_layouts_have_distinct_sizes() {
     for mt in [MapType::Base, MapType::Mini] {
         let map = build_map(mt, NumberPlacement::OfficialSpiral, &mut catanatron::rng::Rng::new(0));
         let mut sizes = HashSet::new();
-        for k in 0..128 {
+        for k in 0..256 {
             let f = ObsFeatures {
                 dice: k & 1 != 0,
                 hands: k & 2 != 0,
@@ -355,6 +356,7 @@ fn observation_layouts_have_distinct_sizes() {
                 dice_history: k & 16 != 0,
                 spots: k & 32 != 0,
                 reach: k & 64 != 0,
+                structure: k & 128 != 0,
             };
             if f.dice_history && !f.dice {
                 continue;
