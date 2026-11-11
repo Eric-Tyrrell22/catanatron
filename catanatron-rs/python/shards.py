@@ -41,18 +41,28 @@ def encode(d, meta):
     arrays["game"] = np.frombuffer(d["game"], "<u4")
     stats = {k: d[k] for k in ("n", "results", "decisions", "escalated", "branches", "forks",
                                "pool_games", "luck_abs", "luck_events")}
-    # Fork pairs summarised per kind: count, mean (main - fork) result for the fork's mover, mean alternative probability.
+    # Fork pairs summarised per kind: count, mean (main - fork) result for the fork's mover, mean alternative
+    # probability, mean regret (how much the alternative beat the main pick, floored at 0). A settlement fork is
+    # also counted under its settlement ordinal ("open0".."open3", "open_uniform0"..).
     pairs = {}
     for main_v, fork_v, p_alt, kind in d.get("fork_pairs", []):
-        c = pairs.setdefault(("open", "mid", "open_uniform", "mid_uniform")[kind], [0, 0.0, 0.0])
-        c[0] += 1; c[1] += main_v - fork_v; c[2] += p_alt
-    pairs = {k: [n, s_ / n, p_ / n] for k, (n, s_, p_) in pairs.items()}
+        for name in fork_kind_names(kind):
+            c = pairs.setdefault(name, [0, 0.0, 0.0, 0.0])
+            c[0] += 1; c[1] += main_v - fork_v; c[2] += p_alt; c[3] += max(0.0, fork_v - main_v)
+    pairs = {k: [n, s_ / n, p_ / n, r_ / n] for k, (n, s_, p_, r_) in pairs.items()}
     header = json.dumps({**meta, "aux_size": X, "stats": stats, "boards": [[int(b), float(e)] for b, e in d.get("boards", [])],
                          "fork_pairs": pairs}).encode()
     arrays["header"] = np.frombuffer(header, np.uint8)
     buf = io.BytesIO()
     np.savez(buf, **arrays)
     return lzma.compress(buf.getvalue(), preset=1)  # fast: at low sims a shard plays in ~5 s
+
+
+def fork_kind_names(kind):
+    """The aggregate kind name of a fork pair and, for a settlement fork, its per-ordinal name."""
+    base = ("open", "mid", "open_uniform", "mid_uniform")[kind & 3]
+    tag = kind >> 2
+    return (base, f"{base}{tag - 1}") if tag else (base,)
 
 
 def _dense(count, idx, val, shape):

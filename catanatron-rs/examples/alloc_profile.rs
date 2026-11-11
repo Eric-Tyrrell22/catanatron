@@ -53,7 +53,7 @@ fn main() {
         sims_full: 400, sims_fast: 50, sims_placement: 2400, p_full: 0.25,
         entropy_budget: false, kl_escalate: false, admit_kl: 0.0, focus_sims: 0, temp_moves: 15, root_noise: 0.25,
         dirichlet_alpha: 0.3, c_puct: 1.0, fpu_reduction: 0.25, escalate_gap: 0.0, endgame_vp: 13, endgame_branches: 1,
-        opening_branches: 1, placement_forks: 1, placement_temp: 2.0, placement_uniform: 0.25, move_forks: 0, move_fork_temp: 1.0, move_fork_uniform: 0.0, sibling_labels: false, pool_board_share: 1.0, pool_seeds: Vec::new(), random_share: 0.0,
+        opening_branches: 1, placement_forks: 1, placement_temp: 2.0, placement_uniform: 0.25, fork_settlements_only: false, placement_margin: 0.0, placement_fork_weights: [1.0; 4], move_forks: 0, move_fork_temp: 1.0, move_fork_uniform: 0.0, sibling_labels: false, pool_board_share: 1.0, pool_seeds: Vec::new(), random_share: 0.0,
         random_eps: 1.0, utility: Utility { margin: 0.1, speed: 0.3, speed_turns: 150.0 }, gumbel_m: 0,
         game: GameConfig {
             map_type: MapType::Base, vps_to_win: 15, discard_limit: 9, friendly_robber: FriendlyRobber::PublicPoints,

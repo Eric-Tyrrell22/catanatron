@@ -349,6 +349,15 @@ def main():
     ap.add_argument("--move-forks", type=int, default=0,
                     help="replay each game this many times from a searched mid-game road or robber decision with a "
                          "different choice (drawn with --placement-temp / --placement-uniform): outcome data for alternatives")
+    ap.add_argument("--fork-settlements-only", action="store_true",
+                    help="placement forks only at settlement decisions, each settlement of a game forked once before any twice")
+    ap.add_argument("--placement-margin", type=float, default=0.0,
+                    help="a settlement fork's alternative is drawn uniformly from the legal spots within this many pips of the best "
+                         "(the plausible ones) instead of from the flattened search target (0 = off)")
+    ap.add_argument("--regret-forks", action="store_true",
+                    help="with --fork-settlements-only: weight the choice of which settlement decision a placement fork replays by "
+                         "the running mean regret of its forks (how much alternatives beat the network's pick), so forks go where "
+                         "the network is wrong most; weights are published to the actors each iteration")
     ap.add_argument("--placement-uniform", type=float, default=0.0,
                     help="share of placement forks whose settlement or road is any other legal choice, uniformly")
     ap.add_argument("--margin-weight", type=float, default=0.0,
@@ -676,7 +685,7 @@ def main():
         temp_moves=args.temp_moves, root_noise=args.root_noise, dirichlet_alpha=args.alpha, c_puct=args.c_puct,
         fpu_reduction=args.fpu, escalate_gap=args.escalate_gap, entropy_budget=args.entropy_budget, kl_escalate=args.kl_escalate, admit_kl=args.admit_kl, focus_sims=args.focus_sims, endgame_vp=args.endgame_vp,
         endgame_branches=args.endgame_branches, opening_branches=args.opening_branches,
-        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
+        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, fork_settlements_only=args.fork_settlements_only, placement_margin=args.placement_margin, placement_fork_weights=list(meta.get("fork_weights_init", [1.0, 1.0, 1.0, 1.0])), move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
         speed_weight=args.speed_weight, speed_turns=args.speed_turns, board=board, **rules_from_args(args))
     # Random-opponent games stop for good once search beats the random bot in
     # every evaluation game with none capped (recorded in meta, so a resumed
@@ -744,10 +753,11 @@ def main():
         for seed_b, err in d["boards"]:
             hard_boards[int(seed_b)] = 0.5 * hard_boards.get(int(seed_b), err) + 0.5 * err
         # Fork pairs this iteration (local + remote): count, sum of (main - fork), sum of alt prob, per kind.
-        fork_acc = {k: [0, 0.0, 0.0] for k in ("open", "mid", "open_uniform", "mid_uniform")}
+        fork_acc = {k: [0, 0.0, 0.0, 0.0] for k in ("open", "mid", "open_uniform", "mid_uniform")}
         for main_v, fork_v, p_alt, kind in d["fork_pairs"]:
-            c = fork_acc[("open", "mid", "open_uniform", "mid_uniform")[kind]]
-            c[0] += 1; c[1] += main_v - fork_v; c[2] += p_alt
+            for name in shards.fork_kind_names(kind):
+                c = fork_acc.setdefault(name, [0, 0.0, 0.0, 0.0])
+                c[0] += 1; c[1] += main_v - fork_v; c[2] += p_alt; c[3] += max(0.0, fork_v - main_v)
         if d["aux_size"] != AUX:
             raise SystemExit(f"self-play gives {d['aux_size']} auxiliary targets, az.py expects {AUX}")
         n_local = d["n"]
@@ -771,9 +781,11 @@ def main():
                 remote_lag.append(meta["iters"] - header["model_iter"])
                 for seed_b, err in header.get("boards", []):
                     hard_boards[int(seed_b)] = 0.5 * hard_boards.get(int(seed_b), err) + 0.5 * err
-                for kind, (cnt, gap, p_alt) in header.get("fork_pairs", {}).items():
-                    c = fork_acc[kind]
-                    c[0] += cnt; c[1] += gap * cnt; c[2] += p_alt * cnt
+                for kind, stats_k in header.get("fork_pairs", {}).items():
+                    cnt, gap, p_alt = stats_k[:3]
+                    regret = stats_k[3] if len(stats_k) > 3 else 0.0
+                    c = fork_acc.setdefault(kind, [0, 0.0, 0.0, 0.0])
+                    c[0] += cnt; c[1] += gap * cnt; c[2] += p_alt * cnt; c[3] += regret * cnt
                 teacher_shards += header.get("teacher") is not None
                 # Game statistics of the shard's self-play, so the log reflects remote games too (not just the local ones).
                 for k in ("decisions", "escalated", "branches", "forks", "pool_games", "luck_abs", "luck_events"):
@@ -897,7 +909,8 @@ def main():
                  "pool_games": d["pool_games"] + shard_stats["pool_games"], "pool_size": len(pool), "random_games": d["random_games"], "endgame_share": endgame_share,
                  "surprise": mean_surprise, "luck_per_event": luck, "luck_c": luck_c,
                  "loss_pi": loss_pi, "loss_v": loss_v, "loss_aux": loss_aux, "loss_aux2": loss_aux2, "entropy": ent, "target_entropy": target_ent,
-                 "fork_pairs": {k: {"n": c[0], "gap": c[1] / c[0], "alt_p": c[2] / c[0]} for k, c in fork_acc.items() if c[0]},
+                 "fork_pairs": {k: {"n": c[0], "gap": c[1] / c[0], "alt_p": c[2] / c[0], "regret": c[3] / c[0]} for k, c in fork_acc.items() if c[0]},
+                 "fork_weights": self_play_kwargs.get("placement_fork_weights"),
                  "train_steps": steps, "play_s": t_play, "learn_s": t_learn}
         if omodel is not None:
             entry["opening"] = {"new": n_open, "replay": oreplay.size, "steps": osteps, "total_steps": ometa["steps"],
@@ -916,6 +929,16 @@ def main():
                 save(ckpt_path, model, opt, meta)
                 print(f"beat the random bot in every evaluation game: random-opponent games off from iteration {meta['iters']}", flush=True)
         entry["random_share"] = self_play_kwargs["random_share"]
+        if args.regret_forks:
+            # Running mean regret per settlement decision (both draw kinds), published as fork weights with mean 1.
+            ema = meta.setdefault("fork_regret", [0.05, 0.05, 0.05, 0.05])
+            for i in range(4):
+                n = sum(fork_acc.get(k, [0])[0] for k in (f"open{i}", f"open_uniform{i}"))
+                if n:
+                    r = sum(fork_acc.get(k, [0, 0, 0, 0.0])[3] for k in (f"open{i}", f"open_uniform{i}")) / n
+                    ema[i] = 0.9 * ema[i] + 0.1 * r
+            w = [e + 0.02 for e in ema]
+            self_play_kwargs["placement_fork_weights"] = [4 * x / sum(w) for x in w]
         if remote is not None:  # after the eval, so a new snapshot can join the pool
             remote.publish(meta["iters"], to_bytes(model, OBS, ACTIONS), pool_paths(), args.pool_share, self_play_kwargs, opening_bytes())
         log.write(json.dumps(entry) + "\n")

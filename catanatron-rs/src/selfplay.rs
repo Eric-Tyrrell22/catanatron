@@ -123,6 +123,19 @@ pub struct SelfPlayConfig {
     /// Share of forks whose placement is drawn uniformly from the other
     /// legal choices instead of from the flattened search target.
     pub placement_uniform: f32,
+    /// Placement forks only at settlement decisions (not roads), each
+    /// settlement of the game forked once before any is forked twice.
+    pub fork_settlements_only: bool,
+    /// With a positive margin, a settlement fork's alternative is drawn
+    /// uniformly from the other legal spots within this many pips of the best
+    /// legal spot (the plausible ones) instead of from the flattened search
+    /// target. Such forks, like uniform ones, are not sibling labels.
+    pub placement_margin: f32,
+    /// With `fork_settlements_only`: relative weight of each settlement decision
+    /// (0..3 in placement order) for choosing which one a placement fork replays
+    /// (all 1 = cycle through them; the learner sets these from the forks'
+    /// regret, so more forks go where the network is wrong most).
+    pub placement_fork_weights: [f32; 4],
     /// Move forks: after the game, it is replayed this many times from a
     /// fully searched mid-game road or robber decision of the main game,
     /// with a different choice (drawn like a placement fork, with
@@ -670,26 +683,58 @@ fn play_game(
             out.z_luck[k] = adjusted - sign * (opening.luck - before);
         }
     }
-    let placement_points: Vec<&ForkPoint> = main.forks.iter().filter(|f| !f.mid_game).collect();
+    let is_settlement = |f: &ForkPoint| matches!(f.game.playable_actions[f.pick].kind, ActionKind::BuildSettlement(_));
+    let placement_points: Vec<&ForkPoint> = main.forks.iter().filter(|f| !f.mid_game && (!cfg.fork_settlements_only || is_settlement(f))).collect();
     let move_points: Vec<&ForkPoint> = main.forks.iter().filter(|f| f.mid_game).collect();
     let plan = std::iter::repeat(&placement_points).take(cfg.placement_forks as usize).chain(std::iter::repeat(&move_points).take(cfg.move_forks as usize));
-    for points in plan {
+    // Placement forks walk the placement decisions from a random start, so each is forked once before any twice.
+    let placement_start = rng.below(placement_points.len().max(1));
+    for (fi, points) in plan.enumerate() {
         if points.is_empty() {
             continue;
         }
-        let point = points[rng.below(points.len())];
+        let point = if fi < cfg.placement_forks as usize {
+            let w = &cfg.placement_fork_weights;
+            if cfg.fork_settlements_only && w.iter().any(|&x| (x - 1.0).abs() > 1e-6) {
+                // Regret-weighted: more forks at the settlement decisions the network gets wrong most.
+                let weights: Vec<f32> = points.iter().map(|p| if (p.settlement as usize) < 4 { w[p.settlement as usize].max(0.0) } else { 1.0 }).collect();
+                points[crate::mcts::sample_index(&weights, &mut rng)]
+            } else {
+                points[(placement_start + fi) % points.len()]
+            }
+        } else {
+            points[rng.below(points.len())]
+        };
         let (temp, p_uniform) = if point.mid_game { (cfg.move_fork_temp, cfg.move_fork_uniform) } else { (cfg.placement_temp, cfg.placement_uniform) };
-        let uniform_pick = uniform(&mut rng) < p_uniform;
-        let weights: Vec<f32> = point
-            .target
-            .iter()
-            .enumerate()
-            .map(|(k, &t)| match (k == point.pick, uniform_pick) {
-                (true, _) => 0.0,
-                (false, true) => 1.0,
-                (false, false) => t.max(1e-30).powf(1.0 / temp),
-            })
-            .collect();
+        let mut uniform_pick = uniform(&mut rng) < p_uniform;
+        let mut weights: Vec<f32> = Vec::new();
+        if !uniform_pick && !point.mid_game && cfg.placement_margin > 0.0 && is_settlement(point) {
+            // The plausible alternatives: legal spots within the margin of the best one, by pips.
+            let map = &point.game.state.board.map;
+            let pips = |a: &Action| match a.kind {
+                ActionKind::BuildSettlement(n) => map.node_production[n as usize].iter().sum::<f64>() as f32 * 36.0,
+                _ => 0.0,
+            };
+            let best = point.game.playable_actions.iter().map(pips).fold(0.0, f32::max);
+            weights = point.game.playable_actions.iter().enumerate().map(|(k, a)| (k != point.pick && pips(a) >= best - cfg.placement_margin) as u8 as f32).collect();
+            if weights.iter().sum::<f32>() > 0.0 {
+                uniform_pick = true; // not a sibling label, counted with the uniform forks
+            } else {
+                weights.clear();
+            }
+        }
+        if weights.is_empty() {
+            weights = point
+                .target
+                .iter()
+                .enumerate()
+                .map(|(k, &t)| match (k == point.pick, uniform_pick) {
+                    (true, _) => 0.0,
+                    (false, true) => 1.0,
+                    (false, false) => t.max(1e-30).powf(1.0 / temp),
+                })
+                .collect();
+        }
         let alt = crate::mcts::sample_index(&weights, &mut rng);
         let mut g = rerandomize(&point.game, &mut rng);
         let action = g.playable_actions[alt];
@@ -700,7 +745,9 @@ fn play_game(
             siblings.push((point.record_index, b.values, point.luck_before, b.luck));
         }
         let fork_mover = main.records[point.record_index].0;
-        out.fork_pairs.push((main.values[fork_mover.idx()], b.values[fork_mover.idx()], point.target[alt], point.mid_game as u8 + 2 * uniform_pick as u8));
+        // kind: bit 0 mid-game, bit 1 uniform/plausible draw, bits 2.. = settlement ordinal + 1 (0 = not a settlement).
+        let settlement_tag = if point.settlement < 4 { 4 * (point.settlement + 1) } else { 0 };
+        out.fork_pairs.push((main.values[fork_mover.idx()], b.values[fork_mover.idx()], point.target[alt], point.mid_game as u8 + 2 * uniform_pick as u8 + settlement_tag));
         out.forks += 1;
     }
     // Opening value error of this board, for prioritised board sampling.
@@ -745,6 +792,8 @@ struct ForkPoint {
     searched: [u32; 2],
     /// A mid-game road/robber decision (`move_forks`) rather than a placement.
     mid_game: bool,
+    /// Which settlement of the game this decision placed (0..3), 255 otherwise.
+    settlement: u8,
     /// Index of this decision's example in the main game, and the luck before it.
     record_index: usize,
     luck_before: f32,
@@ -816,6 +865,7 @@ fn play_out(
     let mut endgame_snap = None;
     let mut opening = None;
     let mut forks = Vec::new();
+    let mut settlements_placed: u8 = 0;
     let mut legal = vec![false; a];
     while !game.is_over() {
         let endgame = cfg.endgame_vp > 0 && max_points(&game) >= cfg.endgame_vp;
@@ -989,8 +1039,13 @@ fn play_out(
         } else {
             (0..visits.len()).max_by_key(|&k| visits[k]).unwrap()
         };
+        let settles = placing && matches!(actions[pick].kind, ActionKind::BuildSettlement(_));
         if let Some((target, mid_game)) = fork_target {
-            forks.push(ForkPoint { game: game.copy_without_history(), target, pick, searched: *searched, mid_game, record_index: records.len() - 1, luck_before: luck });
+            let settlement = if !mid_game && settles { settlements_placed } else { 255 };
+            forks.push(ForkPoint { game: game.copy_without_history(), target, pick, searched: *searched, mid_game, settlement, record_index: records.len() - 1, luck_before: luck });
+        }
+        if settles {
+            settlements_placed = settlements_placed.saturating_add(1);
         }
         searched[seat] += 1;
         if let Some(l) = execute_logged(&mut game, actions[pick], ctx, &mut action_log, records.len())? {
