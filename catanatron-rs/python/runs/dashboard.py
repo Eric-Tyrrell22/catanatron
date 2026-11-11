@@ -244,7 +244,8 @@ def run_series(name, downsample=True):
     shards = 0
     walls = []
     full = {k: [] for k in ["iter", "games", "actor_hours", "wall_min", "games_per_hour"] + SCALARS +
-            ["fp_open_gap", "fp_open_alt_p", "fp_open_n", "fp_mid_gap", "fp_mid_alt_p", "fp_mid_n"]}
+            ["fp_open_gap", "fp_open_alt_p", "fp_open_n", "fp_mid_gap", "fp_mid_alt_p", "fp_mid_n",
+             "open_loss_pi", "open_loss_v", "open_steps", "open_replay"]}
     for i, r in enumerate(rows):
         m = num(r.get("minutes"))
         if m is not None:
@@ -269,6 +270,10 @@ def run_series(name, downsample=True):
             d = fp.get(ph) if isinstance(fp.get(ph), dict) else {}
             for f in ("gap", "alt_p", "n"):
                 full[f"fp_{ph}_{f}"].append(num(d.get(f)))
+        # The separate opening network (az.py --opening-net), when the run has one.
+        op = r.get("opening") if isinstance(r.get("opening"), dict) else {}
+        for f in ("loss_pi", "loss_v", "steps", "replay"):
+            full[f"open_{f}"].append(num(op.get(f)))
     n = len(rows)
     keep = list(range(n))
     if downsample and n > MAX_POINTS:
