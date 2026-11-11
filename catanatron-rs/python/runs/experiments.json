@@ -1,5 +1,5 @@
 {
- "updated": "2026-11-10T22:35:00-05:00",
+ "updated": "2026-11-10T23:15:00-05:00",
  "rules": {
   "one_arm_at_a_time": "one training arm uses the fleet at a time; the recorded control curve (runs ac/kc/o4, flat at 51% vs Ham) is the baseline, no control arm",
   "checkpoints": "25k games: kill only if the learner is unhealthy. 50k: kill if panel flat AND the card's leading indicator flat AND Ham <= control. 100k: kill if Ham < control - 0.5 or panel flat; else run to 300k. 300k: promote (Pig match, ablation) if >= control + 1.5.",
@@ -32,7 +32,9 @@
    "extend": "panel >= 40",
    "cost": "~1 day of engine + learner plumbing (two-net evaluator keyed on is_initial_build_phase, key option, bindings, Mirror, actor image; an opening learner reading shard opening positions and publishing models/opening_<run>.ctnn); then one arm (2 actors, ~2 h per 125k games)",
    "depends_on": "rr2 result (if its reach features already move the panel, build the opening net on them)",
-   "runs": []
+   "runs": [],
+   "notes": "23:15 Nov 10: implemented on branch opening-net (worktree ../catanatron-opening). Engine: PolicyValueNet.opening + Evaluator picks the net by is_initial_build_phase; player keys take main.ctnn@opening.ctnn; self_play(opening_net=); actors read control['opening_model']; tests/opening_net.rs green. Learner: az.py --opening-net (--opening-hidden/-layers/-lr/-replay/-batch/-reuse/-min-replay): copy of the main net, trained on placement rows only (own replay/optimiser, omodel.pt/oreplay.pt), exported as osnap_N.ctnn beside each snap, published as models/<run>/opening_N.ctnn. score_runs.py/panel_score.py use snap@osnap when present; dashboard has an opening-loss chart. Smoke test running.",
+   "launch": "from the main python dir: PYTHONPATH=../../catanatron-opening/catanatron-rs/target/pylib .venv/bin/python ../../catanatron-opening/catanatron-rs/python/az.py --run on1 <rr2 COMMON minus reach flags> --opening-net --opening-lr 2e-4 --opening-share 0 (main net no longer plays placements); needs the actor image rebuilt from the branch"
   },
   {
    "id": "fs1",

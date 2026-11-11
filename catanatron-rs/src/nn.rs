@@ -224,6 +224,25 @@ impl Layer {
         Layer { inputs, outputs, stride, block_w, weight_t, bias }
     }
 
+    /// The weights as f16 bits, output-major (`[outputs][inputs]`, PyTorch's
+    /// order), with two zero entries of padding at the end.
+    fn rows(&self) -> Vec<u16> {
+        let mut rows = vec![0u16; self.outputs * self.inputs + 2];
+        for t in 0..self.blocks() {
+            let (base, w_t) = self.block(t);
+            for i in 0..self.inputs {
+                for c in 0..w_t {
+                    let o = t * self.block_w + c;
+                    if o < self.outputs {
+                        // SAFETY: (i, c) lies within block `t`.
+                        rows[o * self.inputs + i] = unsafe { *base.add(i * w_t + c) };
+                    }
+                }
+            }
+        }
+        rows
+    }
+
     /// Number of weight blocks.
     #[inline(always)]
     fn blocks(&self) -> usize {
@@ -469,6 +488,9 @@ pub struct PolicyValueNet {
     pub action_size: usize,
     trunk: Vec<Layer>,
     policy: Layer,
+    /// The policy weights output-major (`Layer::rows`), for
+    /// `forward_sparse_for`.
+    policy_rows: Vec<u16>,
     value: Layer,
     spots: Option<SpotBranch>,
     /// A separate network for the initial placements (`Evaluator` uses it
@@ -830,7 +852,8 @@ impl PolicyValueNet {
                 return Err("spot branch shapes don't match the trunk".into());
             }
         }
-        Ok(PolicyValueNet { obs_size, action_size, trunk, policy, value, spots, opening: None })
+        let policy_rows = policy.rows();
+        Ok(PolicyValueNet { obs_size, action_size, trunk, policy, policy_rows, value, spots, opening: None })
     }
 
     /// Policy logits (unmasked) into `logits`; returns the value estimate.
@@ -892,7 +915,26 @@ impl PolicyValueNet {
     /// Like `forward`, from the observation's nonzero entries as (index,
     /// value) in increasing index order (see `ObservationSpace::encode_sparse_into`).
     pub fn forward_sparse(&self, obs_nz: &[(u32, f32)], scratch: &mut Scratch, logits: &mut Vec<f32>) -> f32 {
-        let Scratch { a, v, nz, spot, join, .. } = scratch;
+        let (n, tower) = self.trunk_sparse(obs_nz, scratch);
+        self.policy.forward(&scratch.nz[..n], logits);
+        self.value(n, tower, scratch)
+    }
+
+    /// `forward_sparse`, but only the logits of action slots `slots` (in
+    /// that order, `logits[k]` for `slots[k]`; a slot of `u32::MAX` gets
+    /// -inf). Each logit is accumulated in the same order as by the full
+    /// policy layer, so the values are identical; the work follows the
+    /// number of slots (the legal moves) rather than the action space.
+    pub fn forward_sparse_for(&self, obs_nz: &[(u32, f32)], slots: &[u32], scratch: &mut Scratch, logits: &mut Vec<f32>) -> f32 {
+        let (n, tower) = self.trunk_sparse(obs_nz, scratch);
+        self.policy_subset(&scratch.nz[..n], slots, logits);
+        self.value(n, tower, scratch)
+    }
+
+    /// Runs the trunk (and spot branch): the ReLU survivors of the last
+    /// layer are `scratch.nz[..n]`; returns (n, the tower value if any).
+    fn trunk_sparse(&self, obs_nz: &[(u32, f32)], scratch: &mut Scratch) -> (usize, Option<f32>) {
+        let Scratch { a, nz, spot, join, .. } = scratch;
         let tower = self.spots.as_ref().map(|sp| {
             let mut x = std::mem::take(&mut spot.x);
             spot_input(obs_nz, self.obs_size, &mut x);
@@ -912,11 +954,55 @@ impl PolicyValueNet {
             }
             n = compact_positive(a, nz);
         }
-        self.policy.forward(&nz[..n], logits);
+        (n, tower)
+    }
+
+    /// The value head on `scratch.nz[..n]`, combined with the tower's value.
+    fn value(&self, n: usize, tower: Option<f32>, scratch: &mut Scratch) -> f32 {
+        let Scratch { v, nz, .. } = scratch;
         self.value.forward(&nz[..n], v);
         match (&self.spots, tower) {
             (Some(sp), Some(t)) => sp.flat_value_scale * v[0] + t,
             _ => v[0],
+        }
+    }
+
+    /// Policy logits for `slots` only, into `out` (see `forward_sparse_for`):
+    /// eight slots at a time, each lane accumulating bias + sum over `nz` of
+    /// x_i * W[slot][i] with one fused multiply-add per term, in `nz` order:
+    /// the same operations as `Layer::forward` performs for that output.
+    fn policy_subset(&self, nz: &[(u32, f32)], slots: &[u32], out: &mut Vec<f32>) {
+        let inputs = self.policy.inputs;
+        assert!(nz.iter().all(|&(i, _)| (i as usize) < inputs), "input index out of range");
+        assert!(slots.iter().all(|&s| s == u32::MAX || (s as usize) < self.policy.outputs), "action slot out of range");
+        out.clear();
+        out.resize(slots.len(), 0.0);
+        let rows = self.policy_rows.as_ptr();
+        for (chunk, out) in slots.chunks(LANES).zip(out.chunks_mut(LANES)) {
+            // Lanes without a slot (none left, or no slot) follow slot 0 and
+            // are overwritten below.
+            let mut off = [0usize; LANES];
+            let mut bias = [0f32; LANES];
+            for (k, &s) in chunk.iter().enumerate() {
+                let s = if s == u32::MAX { 0 } else { s as usize };
+                off[k] = s * inputs;
+                bias[k] = self.policy.bias[s];
+            }
+            // SAFETY: every row offset is a valid output's and every index
+            // < inputs (asserted above), so each `rows` read is in bounds.
+            unsafe {
+                let mut acc = simd::load(bias.as_ptr());
+                for &(i, xi) in nz {
+                    let i = i as usize;
+                    let w: [u16; LANES] = std::array::from_fn(|k| *rows.add(off[k] + i));
+                    acc = simd::fma(acc, simd::splat(xi), simd::load_f16(w.as_ptr()));
+                }
+                let mut lanes = [0f32; LANES];
+                simd::store(lanes.as_mut_ptr(), acc);
+                for (k, (o, &s)) in out.iter_mut().zip(chunk).enumerate() {
+                    *o = if s == u32::MAX { f32::NEG_INFINITY } else { lanes[k] };
+                }
+            }
         }
     }
 }

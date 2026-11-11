@@ -61,11 +61,16 @@ pub fn load_net(path: &str) -> Result<Arc<PolicyValueNet>, String> {
 /// Softmax of `logits` over `game.playable_actions` (unencodable moves get 0).
 fn priors_from(act_space: &ActionSpace, game: &Game, logits: &[f32]) -> Vec<f32> {
     let s = &game.state;
-    let mut priors: Vec<f32> = game
+    let priors: Vec<f32> = game
         .playable_actions
         .iter()
         .map(|a| act_space.encode(s, a).map_or(f32::NEG_INFINITY, |i| logits[i]))
         .collect();
+    softmax(priors)
+}
+
+/// Softmax of per-move logits (-inf = 0; all -inf = uniform).
+fn softmax(mut priors: Vec<f32>) -> Vec<f32> {
     let max = priors.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0;
     for p in priors.iter_mut() {
@@ -83,6 +88,8 @@ struct NetEval {
     net: Arc<PolicyValueNet>,
     spaces: Option<(ObservationSpace, ActionSpace)>,
     obs_nz: Vec<(u32, f32)>,
+    /// Action slot per playable action (`u32::MAX` = not encodable).
+    slots: Vec<u32>,
     logits: Vec<f32>,
     scratch: Scratch,
     /// Per batch position: sparse observation, logits.
@@ -97,6 +104,7 @@ impl NetEval {
             net,
             spaces: None,
             obs_nz: Vec::new(),
+            slots: Vec::new(),
             logits: Vec::new(),
             scratch: Scratch::default(),
             batch_nz: vec![Vec::new(); MAX_BATCH],
@@ -119,8 +127,11 @@ impl NetEval {
         let (obs_space, act_space) = self.spaces.as_ref().unwrap();
         let s = &game.state;
         let n = obs_space.encode_sparse_into(s, s.current_color(), &mut self.obs_nz);
-        let value = self.net.forward_sparse(&self.obs_nz[..n], &mut self.scratch, &mut self.logits);
-        (priors_from(act_space, game, &self.logits), value)
+        // Only the legal moves' logits are needed (the evaluation count is kept by the owning Evaluator).
+        self.slots.clear();
+        self.slots.extend(game.playable_actions.iter().map(|a| act_space.encode(s, a).map_or(u32::MAX, |i| i as u32)));
+        let value = self.net.forward_sparse_for(&self.obs_nz[..n], &self.slots, &mut self.scratch, &mut self.logits);
+        (softmax(self.logits.clone()), value)
     }
 
     fn evaluate_batch(&mut self, games: &[&Game]) -> Vec<(Vec<f32>, f32)> {
