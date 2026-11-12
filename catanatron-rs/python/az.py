@@ -363,6 +363,9 @@ def main():
                     help="at settlement decisions of the initial build phase, replace this share of the search's root prior with a "
                          "uniform prior over the plausible spots (within --placement-margin pips of the best), so search compares them "
                          "by value instead of amplifying the prior (0 = off, 1 = prior ignored at that root)")
+    ap.add_argument("--opening-value-q-weight", type=float, default=None,
+                    help="with --opening-net: weight of the row's search value (under --placement-horizon-turns, the horizon playout "
+                         "value) in the opening network's value target, the rest being the game outcome (default: --value-q-weight)")
     ap.add_argument("--max-steps", type=int, default=0,
                     help="cap on optimizer steps per iteration for the main network (0 = none): a burst of shards (a slow "
                          "iteration, fast actors) otherwise multiplies the steps on near-on-policy data and the network can "
@@ -376,6 +379,9 @@ def main():
     ap.add_argument("--placement-playouts", type=int, default=12, help="playouts per candidate for --placement-horizon-turns")
     ap.add_argument("--placement-horizon-tau", type=float, default=0.2,
                     help="softmax temperature over the candidates' horizon values for the policy target (value units)")
+    ap.add_argument("--placement-horizon-policy", action="store_true",
+                    help="with --placement-horizon-turns: take the policy target and the move from the playouts' softmax too "
+                         "(default: the playouts supply only the value label; the policy target and move come from the placement search)")
     ap.add_argument("--regret-forks", action="store_true",
                     help="with --fork-settlements-only: weight the choice of which settlement decision a placement fork replays by "
                          "the running mean regret of its forks (how much alternatives beat the network's pick), so forks go where "
@@ -712,7 +718,7 @@ def main():
         temp_moves=args.temp_moves, root_noise=args.root_noise, dirichlet_alpha=args.alpha, c_puct=args.c_puct,
         fpu_reduction=args.fpu, escalate_gap=args.escalate_gap, entropy_budget=args.entropy_budget, kl_escalate=args.kl_escalate, admit_kl=args.admit_kl, focus_sims=args.focus_sims, endgame_vp=args.endgame_vp,
         endgame_branches=args.endgame_branches, opening_branches=args.opening_branches,
-        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, fork_settlements_only=args.fork_settlements_only, placement_margin=args.placement_margin, placement_flatten=args.placement_flatten, placement_horizon_turns=args.placement_horizon_turns, placement_playouts=args.placement_playouts, placement_horizon_tau=args.placement_horizon_tau, placement_fork_weights=list(meta.get("fork_weights_init", [1.0, 1.0, 1.0, 1.0])), move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
+        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, fork_settlements_only=args.fork_settlements_only, placement_margin=args.placement_margin, placement_flatten=args.placement_flatten, placement_horizon_turns=args.placement_horizon_turns, placement_playouts=args.placement_playouts, placement_horizon_tau=args.placement_horizon_tau, placement_horizon_policy=args.placement_horizon_policy, placement_fork_weights=list(meta.get("fork_weights_init", [1.0, 1.0, 1.0, 1.0])), move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
         speed_weight=args.speed_weight, speed_turns=args.speed_turns, board=board, **rules_from_args(args))
     # Random-opponent games stop for good once search beats the random bot in
     # every evaluation game with none capped (recorded in meta, so a resumed
@@ -854,13 +860,31 @@ def main():
             # The placement decisions, each counting fully (the sibling labels already average their continuations).
             o = batch["opening"]
             sel = lambda a: torch.from_numpy(a[o])
-            oreplay.add(sel(batch["obs"]), sel(batch["mask"]), sel(batch["pi"]), sel(value_target.astype(np.float32)),
+            # The opening network's own value target: its search value (the horizon playout value under
+            # --placement-horizon-turns, a far less noisy label than the outcome) at --opening-value-q-weight.
+            ow = args.value_q_weight if args.opening_value_q_weight is None else args.opening_value_q_weight
+            o_value_target = np.clip((1 - ow) * z_target + ow * batch["q"], -bound, bound)
+            oreplay.add(sel(batch["obs"]), sel(batch["mask"]), sel(batch["pi"]), sel(o_value_target.astype(np.float32)),
                         sel(batch["surprise"]), sel(batch["aux"]), sel(batch["opening"]), sel(batch["focus"]),
                         torch.ones(n_open))
         endgame_share = (float(np.frombuffer(d["endgame"], np.uint8).sum()) + shard_stats["endgame"]) / max(1, n_local + shard_stats["n"])
         luck = (d["luck_abs"] + shard_stats["luck_abs"]) / max(1, d["luck_events"] + shard_stats["luck_events"])
         games_seen = args.games + remote_games
         mean_surprise = float(batch["surprise"].mean()) if n else 0.0
+        # The per-decision distribution behind the mean: the mid-game and the opening separately (the
+        # opening's targets are a different kind under --placement-horizon-turns). Most rows sit at the
+        # prior; the learning signal is the tail, so the shares above 0.05 / 0.2 / 0.69 nats (0.69 = the
+        # target's top move had a prior under 50%) and the mean of the surprising rows are logged.
+        surprise_dist = {}
+        if n:
+            is_open = batch["opening"].astype(bool)
+            for name, sel_rows in (("mid", ~is_open), ("open", is_open)):
+                x = batch["surprise"][sel_rows]
+                if len(x):
+                    q = np.percentile(x, [50, 90, 99])
+                    surprise_dist[name] = {"n": int(len(x)), "mean": float(x.mean()), "p50": float(q[0]), "p90": float(q[1]), "p99": float(q[2]),
+                                           "gt05": float((x > 0.05).mean()), "gt20": float((x > 0.2).mean()), "gt69": float((x > 0.69).mean()),
+                                           "mean_gt05": float(x[x > 0.05].mean()) if (x > 0.05).any() else 0.0}
         t_play = time.time() - t0
 
         # ---- Learn toward the search's visit counts and the results.
@@ -938,7 +962,7 @@ def main():
                  "decisions_per_game": (d["decisions"] + shard_stats["decisions"]) / max(1, games_seen),
                  "escalated": d["escalated"] + shard_stats["escalated"], "branches": d["branches"] + shard_stats["branches"], "forks": d["forks"] + shard_stats["forks"],
                  "pool_games": d["pool_games"] + shard_stats["pool_games"], "pool_size": len(pool), "random_games": d["random_games"], "endgame_share": endgame_share,
-                 "surprise": mean_surprise, "luck_per_event": luck, "luck_c": luck_c,
+                 "surprise": mean_surprise, "surprise_dist": surprise_dist, "luck_per_event": luck, "luck_c": luck_c,
                  "loss_pi": loss_pi, "loss_v": loss_v, "loss_aux": loss_aux, "loss_aux2": loss_aux2, "entropy": ent, "target_entropy": target_ent,
                  "fork_pairs": {k: {"n": c[0], "gap": c[1] / c[0], "alt_p": c[2] / c[0], "regret": c[3] / c[0]} for k, c in fork_acc.items() if c[0]},
                  "fork_weights": self_play_kwargs.get("placement_fork_weights"),

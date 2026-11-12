@@ -148,6 +148,16 @@ pub struct SelfPlayConfig {
     pub placement_horizon_turns: u32,
     pub placement_playouts: u32,
     pub placement_horizon_tau: f32,
+    /// With `placement_horizon_turns`: also take the policy target and the move
+    /// from the playouts' softmax (the first on4 arm). Off = the playouts supply
+    /// only the row's value (the horizon value label); the policy target and the
+    /// move come from the placement search as before. Decoupled because the
+    /// 12-playout softmax is a noisy policy target (on4: policy regret 6.6-8.6
+    /// pts vs 6 with the search target) while the value head gained from the
+    /// label; the search's values come from the opening network, so a better
+    /// value head improves the search target too (the KataGo / MuZero split:
+    /// policy from the strongest search, value from the least noisy estimate).
+    pub placement_horizon_policy: bool,
     /// With `fork_settlements_only`: relative weight of each settlement decision
     /// (0..3 in placement order) for choosing which one a placement fork replays
     /// (all 1 = cycle through them; the learner sets these from the forks'
@@ -1023,12 +1033,15 @@ fn play_out(
         // arbitrary roads, which cost 3 points against Ham within 10 iterations on Nov 11.
         let horizon = (placing && cfg.placement_horizon_turns > 0 && matches!(actions[0].kind, ActionKind::BuildSettlement(_)))
             .then(|| horizon_targets(ctx, &game, &actions, rng));
+        if let Some((_, _, _, forwards)) = &horizon {
+            out.sims += forwards;
+        }
+        // The policy target and the move come from the playouts only with `placement_horizon_policy`;
+        // otherwise the search runs as usual and the playouts supply the row's value alone.
+        let policy_from_horizon = horizon.is_some() && cfg.placement_horizon_policy;
         let mut visits = match &horizon {
-            Some((target, _, _, forwards)) => {
-                out.sims += forwards;
-                target.iter().map(|t| (t * 1000.0).round() as u32).collect()
-            }
-            None => {
+            Some((target, _, _, _)) if policy_from_horizon => target.iter().map(|t| (t * 1000.0).round() as u32).collect(),
+            _ => {
                 let v = player.search(&game)?;
                 out.sims += player.config.simulations as u64;
                 v
@@ -1090,9 +1103,9 @@ fn play_out(
             obs_space.encode_into(&game.state, mover, &mut out.obs[start..]);
             act_space.fill_mask(&game.state, &actions, &mut legal);
             out.mask.extend(legal.iter().map(|&m| m as u8));
-            let (target, q_value, priors): (Vec<f32>, f32, Vec<f32>) = match &horizon {
-                Some((target, q, prior, _)) => (target.clone(), *q, prior.clone()),
-                None => {
+            let (target, mut q_value, priors): (Vec<f32>, f32, Vec<f32>) = match &horizon {
+                Some((target, q, prior, _)) if policy_from_horizon => (target.clone(), *q, prior.clone()),
+                _ => {
                     let (stats, root_value) = player.root_stats();
                     let target = completed_q_target(&stats, root_value, cfg.utility.bound());
                     let visited: u32 = stats.iter().map(|s| s.1).sum();
@@ -1100,6 +1113,9 @@ fn play_out(
                     (target, if visited > 0 { q_sum / visited as f32 } else { root_value }, stats.iter().map(|s| s.0).collect())
                 }
             };
+            if let Some((_, q, _, _)) = &horizon {
+                q_value = *q; // the horizon value label, whichever head chose the policy target
+            }
             out.q.push(q_value);
             let prior_sum: f32 = priors.iter().sum();
             out.surprise.push(
@@ -1135,7 +1151,7 @@ fn play_out(
             }
         }
 
-        let pick = if let Some(choice) = player.gumbel_choice().filter(|_| horizon.is_none()) {
+        let pick = if let Some(choice) = player.gumbel_choice().filter(|_| !policy_from_horizon) {
             choice
         } else if searched[seat] < cfg.temp_moves && total > 0 {
             let weights: Vec<f32> = visits.iter().map(|&v| v as f32).collect();
