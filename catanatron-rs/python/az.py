@@ -481,6 +481,10 @@ def main():
                          "number spread (board-constant) and, in the initial build phase, its relation to the opponents' settlements "
                          "(plan damage, distance, road block, shared tiles, denied resources, local rank) and to its own "
                          "(plan score, cover, complement): what the board specialists' replies and second settlements track")
+    ap.add_argument("--award-features", action="store_true",
+                    help="network sees, per seat, what it takes to hold longest road and largest army and whether that is still "
+                         "reachable (roads needed and the open extension available, knights needed and possibly available, "
+                         "points plus the reachable awards, the award swing)")
     ap.add_argument("--opening-init", default=None,
                     help="with --opening-net: start the opening network from this omodel.pt (inputs widened with zero weights "
                          "for new feature blocks) instead of from a copy of the main network")
@@ -506,14 +510,14 @@ def main():
 
     probe = VecEnv(1, ["R"], opponent_hands=args.opponent_hands, opponent_devs=args.opponent_devs,
                    extra_info=args.extra_info, spot_features=args.spot_features, reach_features=args.reach_features,
-                   structure_features=args.structure_features, relation_features=args.relation_features, **rules_from_args(args))
+                   structure_features=args.structure_features, relation_features=args.relation_features, award_features=args.award_features, **rules_from_args(args))
     OBS, ACTIONS = probe.obs_size, probe.action_size
     extra_in = 0
     if args.reach_lr_mult > 0:
         if not args.reach_features:
             raise SystemExit("--reach-lr-mult needs --reach-features")
-        if args.structure_features or args.relation_features:
-            raise SystemExit("--reach-lr-mult routes the trailing inputs; the structure and relation blocks come after the reach block")
+        if args.structure_features or args.relation_features or args.award_features:
+            raise SystemExit("--reach-lr-mult routes the trailing inputs; the structure, relation and award blocks come after the reach block")
         extra_in = OBS - VecEnv(1, ["R"], opponent_hands=args.opponent_hands, opponent_devs=args.opponent_devs,
                                 extra_info=args.extra_info, spot_features=args.spot_features, **rules_from_args(args)).obs_size
     torch.manual_seed(args.seed)

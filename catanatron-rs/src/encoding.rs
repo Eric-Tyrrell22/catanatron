@@ -326,8 +326,10 @@ pub struct ObservationSpace {
     reach: bool,
     /// Spot structure (see `ObsFeatures::structure`).
     structure: bool,
-    /// Opening relations (see `ObsFeatures::relation`), last.
+    /// Opening relations (see `ObsFeatures::relation`).
     relation: bool,
+    /// Award reach (see `ObsFeatures::award`), last.
+    award: bool,
     /// The relation block's board-constant per-node entries (`RELATION_CONST`
     /// per land node), computed once per map.
     relation_const: Vec<f32>,
@@ -426,6 +428,33 @@ pub struct ObsFeatures {
     /// plan with the observer's own settlements: score (/ 12), cover (/ 5),
     /// pips in resources the observer lacks (/ 10). Then constant markers.
     pub relation: bool,
+    /// Award reach, per relative seat (`AWARD_PER_PLAYER`): what it would take
+    /// to hold longest road and largest army, and whether it is still
+    /// possible. Roads needed to take the road award (/ 10) and the longest
+    /// extension the network can still build through open edges within that
+    /// many steps (/ 6, searched to depth 6), whether the award is reachable
+    /// with the pieces left; knights needed (/ 5), knights possibly available
+    /// (own hand plus the unseen knights for the observer, cards held plus the
+    /// unseen knights for others, / 5), whether the army is reachable; public
+    /// points plus the awards still reachable (/ 15) and the award swing those
+    /// would add (/ 4). Then constant markers.
+    pub award: bool,
+}
+
+/// Entries per relative seat of the award block.
+pub const AWARD_PER_PLAYER: usize = 8;
+/// Two markers make the block's size unique among the Base map's layouts. No
+/// marker count does on the Mini map, so `for_network` never identifies an
+/// award layout there (the block itself encodes on any map).
+const AWARD_MARKERS: usize = 2;
+
+fn award_len() -> usize {
+    MAX_PLAYERS * AWARD_PER_PLAYER + AWARD_MARKERS
+}
+
+/// Start of the award block, if present.
+pub fn award_offset_of(obs: &ObservationSpace) -> Option<usize> {
+    obs.award.then(|| obs.size - award_len())
 }
 
 /// Board-constant entries per land node of the relation block.
@@ -444,7 +473,7 @@ fn relation_len(num_land_nodes: usize) -> usize {
 
 /// Start of the relation block, if present.
 pub fn relation_offset_of(obs: &ObservationSpace) -> Option<usize> {
-    obs.relation.then(|| obs.size - relation_len(obs.num_land_nodes))
+    obs.relation.then(|| obs.size - relation_len(obs.num_land_nodes) - obs.award_size())
 }
 
 /// Pips of a land node by resource (wood, brick, sheep, wheat, ore).
@@ -469,6 +498,31 @@ fn plan_score(pa: &[f32; 5], pb: &[f32; 5]) -> f32 {
 
 fn cover(pa: &[f32; 5], pb: &[f32; 5]) -> f32 {
     (0..5).filter(|&r| pa[r] + pb[r] > 0.0).count() as f32
+}
+
+/// Longest chain of roads `color` could still add from `start` within `depth`
+/// steps: a depth-first walk over free land edges that does not pass through
+/// another player's building (a road may end at one). An upper bound on how
+/// much the network can grow in that many pieces.
+fn extend_from(b: &crate::board::Board, map: &CatanMap, color: Color, start: usize, depth: usize, used: &mut [bool]) -> usize {
+    if depth == 0 {
+        return 0;
+    }
+    let mut best = 0;
+    for &(next, e) in &map.node_edges[start] {
+        if used[e] || !map.land_edge[e] || b.roads[e].is_some() {
+            continue;
+        }
+        let blocked = b.buildings[next as usize].is_some_and(|(c, _)| c != color);
+        used[e] = true;
+        let len = 1 + if blocked { 0 } else { extend_from(b, map, color, next as usize, depth - 1, used) };
+        used[e] = false;
+        best = best.max(len);
+        if best >= depth {
+            break;
+        }
+    }
+    best
 }
 
 /// The relation block's board-constant per-node entries, `RELATION_CONST` each.
@@ -579,7 +633,7 @@ fn struct_len(num_land_nodes: usize) -> usize {
 
 /// Start of the structure block, if present.
 pub fn struct_offset_of(obs: &ObservationSpace) -> Option<usize> {
-    obs.structure.then(|| obs.size - struct_len(obs.num_land_nodes) - obs.relation_size())
+    obs.structure.then(|| obs.size - struct_len(obs.num_land_nodes) - obs.relation_size() - obs.award_size())
 }
 
 /// Per land node entries of the reach block.
@@ -597,12 +651,12 @@ fn reach_len(num_land_nodes: usize) -> usize {
 
 /// Start of the reach block, if present.
 pub fn reach_offset_of(obs: &ObservationSpace) -> Option<usize> {
-    obs.reach.then(|| obs.size - reach_len(obs.num_land_nodes) - obs.struct_size() - obs.relation_size())
+    obs.reach.then(|| obs.size - reach_len(obs.num_land_nodes) - obs.struct_size() - obs.relation_size() - obs.award_size())
 }
 
 impl ObsFeatures {
     pub const ALL: ObsFeatures =
-        ObsFeatures { dice: true, dice_history: true, hands: true, devs: true, extras: true, spots: true, reach: true, structure: true, relation: true };
+        ObsFeatures { dice: true, dice_history: true, hands: true, devs: true, extras: true, spots: true, reach: true, structure: true, relation: true, award: true };
 }
 
 /// Per land node entries of the spots block.
@@ -678,8 +732,9 @@ impl ObservationSpace {
     /// The layout a network with `obs_size` inputs was trained on: the base
     /// layout plus whichever optional blocks account for the extra inputs.
     pub fn for_network(map: &CatanMap, obs_size: usize) -> ObservationSpace {
+        let num_land_nodes = map.land_nodes.iter().filter(|&&x| x).count();
         for k in 0..32 {
-            for k2 in 0..16 {
+            for k2 in 0..32 {
                 let f = ObsFeatures {
                     dice: k & 1 != 0,
                     hands: k & 2 != 0,
@@ -690,8 +745,9 @@ impl ObservationSpace {
                     reach: k2 & 2 != 0,
                     structure: k2 & 4 != 0,
                     relation: k2 & 8 != 0,
+                    award: k2 & 16 != 0,
                 };
-                if f.dice_history && !f.dice {
+                if f.dice_history && !f.dice || f.award && num_land_nodes != 54 {
                     continue;
                 }
                 let space = ObservationSpace::with_features(map, f);
@@ -709,12 +765,12 @@ impl ObservationSpace {
 
     /// Start of the extras block, if present.
     pub fn extras_offset(&self, map: &CatanMap) -> Option<usize> {
-        self.extras.then(|| self.size - extras_len(map) - self.spots_size() - self.reach_size() - self.struct_size() - self.relation_size())
+        self.extras.then(|| self.size - extras_len(map) - self.spots_size() - self.reach_size() - self.struct_size() - self.relation_size() - self.award_size())
     }
 
     /// Start of the spots block, if present (its per-node part first).
     pub fn spots_offset(&self) -> Option<usize> {
-        self.spots.then(|| self.size - self.spots_size() - self.reach_size() - self.struct_size() - self.relation_size())
+        self.spots.then(|| self.size - self.spots_size() - self.reach_size() - self.struct_size() - self.relation_size() - self.award_size())
     }
 
     fn reach_size(&self) -> usize {
@@ -729,12 +785,16 @@ impl ObservationSpace {
         if self.relation { relation_len(self.num_land_nodes) } else { 0 }
     }
 
+    fn award_size(&self) -> usize {
+        if self.award { award_len() } else { 0 }
+    }
+
     fn spots_size(&self) -> usize {
         if self.spots { spots_len(self.num_land_nodes) } else { 0 }
     }
 
     pub fn with_features(map: &CatanMap, f: ObsFeatures) -> ObservationSpace {
-        let ObsFeatures { dice, dice_history, hands, devs, extras, spots, reach, structure, relation } = f;
+        let ObsFeatures { dice, dice_history, hands, devs, extras, spots, reach, structure, relation, award } = f;
         assert!(dice || !dice_history, "the dice-history block comes with the dice block");
         let num_land_nodes = map.land_nodes.iter().filter(|&&x| x).count();
         let land_edges: Vec<usize> = (0..map.edges.len()).filter(|&i| map.land_edge[i]).collect();
@@ -762,9 +822,10 @@ impl ObservationSpace {
             + if spots { spots_len(num_land_nodes) } else { 0 }
             + if reach { reach_len(num_land_nodes) } else { 0 }
             + if structure { struct_len(num_land_nodes) } else { 0 }
-            + if relation { relation_len(num_land_nodes) } else { 0 };
+            + if relation { relation_len(num_land_nodes) } else { 0 }
+            + if award { award_len() } else { 0 };
         let relation_const = if relation { relation_constants(map, num_land_nodes) } else { Vec::new() };
-        ObservationSpace { dice, dice_history, hands, devs, extras, spots, reach, structure, relation, relation_const, num_land_nodes, node_port, land_edges, size }
+        ObservationSpace { dice, dice_history, hands, devs, extras, spots, reach, structure, relation, award, relation_const, num_land_nodes, node_port, land_edges, size }
     }
 
     pub fn len(&self) -> usize {
@@ -806,6 +867,66 @@ impl ObservationSpace {
     }
 
     /// Single definition of the layout, used both for values and names.
+    /// The award-reach block (see `ObsFeatures::award`), per relative seat.
+    fn write_award<W: Sink>(&self, s: &State, me: Color, w: &mut W) {
+        let b = &s.board;
+        let map = &b.map;
+        let n = s.colors.len();
+        let n_land = self.num_land_nodes;
+        let knight = DevCard::Knight.idx();
+        let played_knights: u32 = s.players.iter().map(|p| p.played_dev_cards[knight]).sum();
+        let unseen_knights = starting_dev_count(DevCard::Knight).saturating_sub(played_knights + s.player(me).dev_cards[knight]);
+        let road_holder = s.longest_road_color();
+        let road_holder_len = road_holder.map_or(4, |c| s.player(c).longest_road_length);
+        let army_holder = s.players.iter().find(|p| p.has_army).map(|p| p.color);
+        let army_holder_knights = army_holder.map_or(2, |c| s.player(c).played_dev_cards[knight]);
+        for r in 0..MAX_PLAYERS {
+            let p = (r < n).then(|| s.player(absolute_color(s, me, r as u8).unwrap()));
+            let Some(p) = p else {
+                for j in 0..AWARD_PER_PLAYER {
+                    w.put(|| format!("P{r}_AWARD{j}"), 0.0);
+                }
+                continue;
+            };
+            let color = p.color;
+            // Longest road: roads needed to take the award from its holder (0 when holding it), and the
+            // longest extension the network can still build through open edges within that many steps.
+            let lr_need = if road_holder == Some(color) { 0 } else { (road_holder_len + 1).max(5).saturating_sub(p.longest_road_length) };
+            let depth = lr_need.min(6) as usize;
+            let mut lr_extend = 0usize;
+            if depth > 0 {
+                let mut visited_edges = vec![false; map.edges.len()];
+                for start in bits_iter(b.network_bits(color)) {
+                    if start < n_land {
+                        lr_extend = lr_extend.max(extend_from(b, map, color, start, depth, &mut visited_edges));
+                    }
+                    if lr_extend >= depth {
+                        break;
+                    }
+                }
+            }
+            let lr_reachable = lr_need > 0 && p.roads_available >= lr_need && lr_extend as u32 >= lr_need;
+            // Largest army: knights needed to take it, and the knights that could still be played.
+            let my_knights = p.played_dev_cards[knight];
+            let la_need = if army_holder == Some(color) { 0 } else { (army_holder_knights + 1).max(3).saturating_sub(my_knights) };
+            let la_possible = if color == me { p.dev_cards[knight] + unseen_knights } else { p.num_dev_cards() + unseen_knights };
+            let la_reachable = la_need > 0 && la_possible >= la_need;
+            let vps = if color == me { p.actual_victory_points } else { p.victory_points };
+            let swing = 2 * lr_reachable as u32 + 2 * la_reachable as u32;
+            w.put(|| format!("P{r}_LR_NEED"), lr_need as f32 / 10.0);
+            w.put(|| format!("P{r}_LR_EXTEND"), lr_extend as f32 / 6.0);
+            w.put(|| format!("P{r}_LR_REACHABLE"), lr_reachable as u8 as f32);
+            w.put(|| format!("P{r}_LA_NEED"), la_need as f32 / 5.0);
+            w.put(|| format!("P{r}_LA_POSSIBLE"), (la_possible as f32 / 5.0).min(2.0));
+            w.put(|| format!("P{r}_LA_REACHABLE"), la_reachable as u8 as f32);
+            w.put(|| format!("P{r}_VPS_WITH_AWARDS"), (vps + swing) as f32 / 15.0);
+            w.put(|| format!("P{r}_AWARD_SWING"), swing as f32 / 4.0);
+        }
+        for k in 0..AWARD_MARKERS {
+            w.put(|| format!("AWARD_BLOCK_{k}"), 1.0);
+        }
+    }
+
     /// The opening-relation block (see `ObsFeatures::relation`): the cached
     /// board constants per land node, then the state-dependent entries, which
     /// are zero outside the initial build phase.
@@ -1313,6 +1434,9 @@ impl ObservationSpace {
 
         if self.relation {
             self.write_relation(s, me, w);
+        }
+        if self.award {
+            self.write_award(s, me, w);
         }
 
         w.finish(self.size);

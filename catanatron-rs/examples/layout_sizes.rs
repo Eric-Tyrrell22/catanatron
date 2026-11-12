@@ -10,9 +10,9 @@ fn main() {
         let map = build_map(mt, NumberPlacement::OfficialSpiral, &mut Rng::new(1));
         let n_land = map.land_nodes.iter().filter(|&&x| x).count();
         let mut sizes = Vec::new();
-        for k in 0..256 {
+        for k in 0..512 {
             let f = ObsFeatures { dice: k & 1 != 0, hands: k & 2 != 0, devs: k & 4 != 0, extras: k & 8 != 0, dice_history: k & 16 != 0,
-                                  spots: k & 32 != 0, reach: k & 64 != 0, structure: k & 128 != 0, relation: false };
+                                  spots: k & 32 != 0, reach: k & 64 != 0, structure: k & 128 != 0, relation: k & 256 != 0, award: false };
             if f.dice_history && !f.dice {
                 continue;
             }

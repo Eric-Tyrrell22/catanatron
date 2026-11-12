@@ -66,6 +66,8 @@ pub struct VecEnvConfig {
     pub structure_features: bool,
     /// Opening-relation block (see `ObsFeatures::relation`).
     pub relation_features: bool,
+    /// Award-reach block (see `ObsFeatures::award`).
+    pub award_features: bool,
     /// Extra reward per victory point the learner gains (0 = win/loss only).
     pub vp_reward: f32,
 }
@@ -90,6 +92,7 @@ impl Default for VecEnvConfig {
             reach_features: false,
             structure_features: false,
             relation_features: false,
+            award_features: false,
             vp_reward: 0.0,
         }
     }
@@ -283,6 +286,7 @@ fn spaces(config: &VecEnvConfig) -> (ObservationSpace, ActionSpace) {
         reach: config.reach_features,
         structure: config.structure_features,
         relation: config.relation_features,
+        award: config.award_features,
     };
     (ObservationSpace::with_features(&map, features), ActionSpace::new(&map))
 }
