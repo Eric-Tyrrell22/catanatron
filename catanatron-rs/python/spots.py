@@ -68,6 +68,72 @@ def spot_tables(names, map_type="BASE"):
     }
 
 
+def spot_head_tables(names, map_type="BASE"):
+    """Index tables for model.SpotHead from an observation's names: per land node
+    the positions of its NODE/SPOT/STRUCT/REL entries (every node must have the
+    same count), its neighbours at road distance 1 (padded to 3 with N) and 2
+    (padded to the widest with N), and its settlement action slot."""
+    obs_size = len(names)
+    node_tiles, edges = catanatron_rs.board_topology(map_type)
+    num_nodes = len(node_tiles)
+    per_node = [[] for _ in range(num_nodes)]
+    for i, name in enumerate(names):
+        m = re.fullmatch(r"(?:NODE|SPOT|STRUCT|REL)(\d+)_.*", name)
+        if m and int(m.group(1)) < num_nodes:
+            per_node[int(m.group(1))].append(i)
+    widths = {len(p) for p in per_node}
+    if len(widths) != 1 or not per_node[0]:
+        raise ValueError(f"per-node entry counts differ across nodes: {sorted(widths)}")
+    adj1 = [set() for _ in range(num_nodes)]
+    for a, b in edges:
+        adj1[a].add(b)
+        adj1[b].add(a)
+    adj2 = [set(k for m in adj1[n] for k in adj1[m] if k != n and k not in adj1[n]) for n in range(num_nodes)]
+    k2 = max(len(s) for s in adj2)
+    pad = lambda s, w: sorted(s) + [num_nodes] * (w - len(s))
+    return {
+        "head_node_feat": np.array(per_node, dtype=np.int64),                      # [N, F]
+        "head_adj1": np.array([pad(s, 3) for s in adj1], dtype=np.int64),           # [N, 3]
+        "head_adj2": np.array([pad(s, k2) for s in adj2], dtype=np.int64),          # [N, K]
+        "head_slot": np.array(catanatron_rs.settlement_slots(map_type), dtype=np.int64),  # [N]
+    }
+
+
+def board_head_tables(names, map_type="BASE"):
+    """Index tables for model.BoardHeads (mid-game settlement/city, road and robber scores from one node
+    encoder): the spot head's node tables plus, per land edge (board_topology order), its two nodes and its
+    EDGE entries; per land tile, its adjacent nodes (padded with N) and its TILE entries; and the action
+    slots of every settlement, city, road and robber move (tile x victim)."""
+    t = spot_head_tables(names, map_type)
+    obs_size = len(names)
+    node_tiles, edges = catanatron_rs.board_topology(map_type)
+    num_nodes, num_tiles = len(node_tiles), 1 + max(x for ts in node_tiles for x in ts)
+    edge = _group(names, r"EDGE(\d+_\d+)_.*")
+    tile = _group(names, r"TILE(\d+)_.*")
+    edge_feat = [edge[f"{a}_{b}"] for a, b in edges]
+    tile_feat = [tile[str(k)] for k in range(num_tiles)]
+    if len({len(f) for f in edge_feat}) != 1 or len({len(f) for f in tile_feat}) != 1:
+        raise ValueError("edge or tile entry counts differ")
+    by_tile = [[] for _ in range(num_tiles)]
+    for n, ts in enumerate(node_tiles):
+        for k in ts:
+            by_tile[k].append(n)
+    w = max(len(ns) for ns in by_tile)
+    settle, city, road, robber = catanatron_rs.board_slots(map_type)
+    if len(road) != len(edges) or len(robber) != num_tiles:
+        raise ValueError("slot tables don't match the topology")
+    t.update({
+        "head_edge_nodes": np.array(edges, dtype=np.int64),                                    # [E, 2]
+        "head_edge_feat": np.array(edge_feat, dtype=np.int64),                                 # [E, Fe]
+        "head_tile_nodes": np.array([ns + [num_nodes] * (w - len(ns)) for ns in by_tile], dtype=np.int64),  # [T, 6]
+        "head_tile_feat": np.array(tile_feat, dtype=np.int64),                                 # [T, Ft]
+        "head_city_slot": np.array(city, dtype=np.int64),                                      # [N]
+        "head_road_slot": np.array(road, dtype=np.int64),                                      # [E]
+        "head_robber_slot": np.array(robber, dtype=np.int64),                                  # [T, 4]
+    })
+    return t
+
+
 def tables_for(obs_size, map_type="BASE", **obs_flags):
     """`spot_tables` for the OpenHex 1v1 layout an `obs_size`-input network
     was trained on (obs_flags: VecEnv's opponent_hands etc.)."""

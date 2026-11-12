@@ -36,6 +36,10 @@ def encode(d, meta):
         arrays[k] = np.frombuffer(d[k], "<f4")
     arrays["aux"] = np.frombuffer(d["aux"], "<f4").reshape(n, X)
     arrays["endgame"] = np.frombuffer(d["endgame"], np.uint8)
+    if "kind" in d:  # the kind of the action played (selfplay::KIND_NAMES), for per-kind losses
+        arrays["kind"] = np.frombuffer(d["kind"], np.uint8)
+    if "horizon" in d:  # the mid-game horizon value label (NaN where not computed)
+        arrays["horizon"] = np.frombuffer(d["horizon"], "<f4")
     arrays["opening"] = np.frombuffer(d["opening"], np.uint8)
     arrays["focus"] = np.frombuffer(d["focus"], np.uint8)
     arrays["game"] = np.frombuffer(d["game"], "<u4")
@@ -90,4 +94,7 @@ def decode(blob):
     out["game"] = a["game"] if "game" in a else np.arange(n, dtype=np.uint32)
     # Shards from before the focus tag have none: no focus decisions.
     out["focus"] = a["focus"] if "focus" in a else np.zeros(n, np.uint8)
+    # Shards from before the kind tag: unknown kind (255).
+    out["kind"] = a["kind"] if "kind" in a else np.full(n, 255, np.uint8)
+    out["horizon"] = a["horizon"] if "horizon" in a else np.full(n, np.nan, np.float32)
     return header, out

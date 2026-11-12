@@ -279,6 +279,22 @@ impl ActionSpace {
     fn land_node(&self, n: NodeId) -> Option<usize> {
         ((n as usize) < self.num_land_nodes).then_some(n as usize)
     }
+
+    /// The settlement action slot of every land node, in node order.
+    pub fn settlement_slots(&self) -> Vec<u32> {
+        (0..self.num_land_nodes).map(|i| (self.o_settlement + i) as u32).collect()
+    }
+
+    /// Board-structured action slots: (settlement [node], city [node], road [land edge, in `CatanMap::edges`
+    /// order], robber [land tile][victim]).
+    pub fn board_slots(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<Vec<u32>>) {
+        let settle = self.settlement_slots();
+        let city = (0..self.num_land_nodes).map(|i| (self.o_city + i) as u32).collect();
+        let road = self.road_slot.iter().filter(|&&s| s != usize::MAX).map(|&s| s as u32).collect();
+        let tiles = (self.o_maritime - self.o_robber) / ROBBER_VICTIMS;
+        let robber = (0..tiles).map(|t| (0..ROBBER_VICTIMS).map(|v| (self.o_robber + t * ROBBER_VICTIMS + v) as u32).collect()).collect();
+        (settle, city, road, robber)
+    }
 }
 
 /// Seats after `me` until `other` (0 = `other` is `me`).
@@ -437,24 +453,36 @@ pub struct ObsFeatures {
     /// (own hand plus the unseen knights for the observer, cards held plus the
     /// unseen knights for others, / 5), whether the army is reachable; public
     /// points plus the awards still reachable (/ 15) and the award swing those
-    /// would add (/ 4). Then constant markers.
+    /// would add (/ 4); then the port fit: production already discounted by
+    /// the seat's ports (pips x discount, / 15), the pips of its most-produced
+    /// resource (/ 15), that resource's discount (/ 2) and how close its 2:1
+    /// port is by road (1 = held, else (6 - distance) / 6 to the nearest open
+    /// spot with it, 0 = none). Then per land node (`AWARD_PER_NODE`): the node
+    /// carries the 2:1 port of the observer's most-produced resource and is
+    /// unbuilt; the node is an unbuilt, buildable interior node of another
+    /// player's road (a cut target), weighted by how close the observer's roads
+    /// are to it (1 = can settle now, else (6 - distance) / 6, 0 = far). Then
+    /// constant markers.
     pub award: bool,
 }
 
 /// Entries per relative seat of the award block.
-pub const AWARD_PER_PLAYER: usize = 8;
-/// Two markers make the block's size unique among the Base map's layouts. No
-/// marker count does on the Mini map, so `for_network` never identifies an
-/// award layout there (the block itself encodes on any map).
-const AWARD_MARKERS: usize = 2;
+pub const AWARD_PER_PLAYER: usize = 12;
+/// Entries per land node of the award block.
+pub const AWARD_PER_NODE: usize = 2;
+/// Markers that make the block's size unique among the Base map's layouts
+/// (examples/layout_sizes.rs; the other blocks' sizes are dense, hence the
+/// count). No count does on the Mini map, so `for_network` never identifies
+/// an award layout there (the block itself encodes on any map).
+const AWARD_MARKERS: usize = 107;
 
-fn award_len() -> usize {
-    MAX_PLAYERS * AWARD_PER_PLAYER + AWARD_MARKERS
+fn award_len(num_land_nodes: usize) -> usize {
+    MAX_PLAYERS * AWARD_PER_PLAYER + num_land_nodes * AWARD_PER_NODE + AWARD_MARKERS
 }
 
 /// Start of the award block, if present.
 pub fn award_offset_of(obs: &ObservationSpace) -> Option<usize> {
-    obs.award.then(|| obs.size - award_len())
+    obs.award.then(|| obs.size - award_len(obs.num_land_nodes))
 }
 
 /// Board-constant entries per land node of the relation block.
@@ -786,7 +814,7 @@ impl ObservationSpace {
     }
 
     fn award_size(&self) -> usize {
-        if self.award { award_len() } else { 0 }
+        if self.award { award_len(self.num_land_nodes) } else { 0 }
     }
 
     fn spots_size(&self) -> usize {
@@ -823,7 +851,7 @@ impl ObservationSpace {
             + if reach { reach_len(num_land_nodes) } else { 0 }
             + if structure { struct_len(num_land_nodes) } else { 0 }
             + if relation { relation_len(num_land_nodes) } else { 0 }
-            + if award { award_len() } else { 0 };
+            + if award { award_len(num_land_nodes) } else { 0 };
         let relation_const = if relation { relation_constants(map, num_land_nodes) } else { Vec::new() };
         ObservationSpace { dice, dice_history, hands, devs, extras, spots, reach, structure, relation, award, relation_const, num_land_nodes, node_port, land_edges, size }
     }
@@ -880,6 +908,24 @@ impl ObservationSpace {
         let road_holder_len = road_holder.map_or(4, |c| s.player(c).longest_road_length);
         let army_holder = s.players.iter().find(|p| p.has_army).map(|p| p.color);
         let army_holder_knights = army_holder.map_or(2, |c| s.player(c).played_dev_cards[knight]);
+        // Production in pips per resource and the port discounts, per colour.
+        let production = |c: Color| {
+            let mut prod = [0.0f32; 5];
+            for &nd in &s.player(c).settlements {
+                add_production(s, nd, 1.0, &mut prod);
+            }
+            for &nd in &s.player(c).cities {
+                add_production(s, nd, 2.0, &mut prod);
+            }
+            prod.map(|x| x * 36.0)
+        };
+        let discount = |c: Color, r: usize| -> u32 {
+            let mask = b.port_mask(c);
+            if mask >> r & 1 == 1 { 2 } else if mask >> 5 & 1 == 1 { 1 } else { 0 }
+        };
+        let top_resource = |pips: &[f32; 5]| (0..5).max_by(|&a, &b2| pips[a].total_cmp(&pips[b2])).unwrap();
+        let my_pips = production(me);
+        let my_top = top_resource(&my_pips);
         for r in 0..MAX_PLAYERS {
             let p = (r < n).then(|| s.player(absolute_color(s, me, r as u8).unwrap()));
             let Some(p) = p else {
@@ -913,6 +959,27 @@ impl ObservationSpace {
             let la_reachable = la_need > 0 && la_possible >= la_need;
             let vps = if color == me { p.actual_victory_points } else { p.victory_points };
             let swing = 2 * lr_reachable as u32 + 2 * la_reachable as u32;
+            // Port fit.
+            let pips = production(color);
+            let top = top_resource(&pips);
+            let fit: f32 = (0..5).map(|k| pips[k] * discount(color, k) as f32 / 2.0).sum();
+            let port_reach = if discount(color, top) == 2 {
+                1.0
+            } else {
+                let dist = road_distances(b, color, 6);
+                let mut best = 6u8;
+                for (res, nodes) in &map.port_nodes {
+                    if res.map(|x| x.idx()) == Some(top) {
+                        for &nd in nodes {
+                            let nd = nd as usize;
+                            if nd < n_land && b.buildable[nd] && b.buildings[nd].is_none() {
+                                best = best.min(dist[nd]);
+                            }
+                        }
+                    }
+                }
+                (6 - best) as f32 / 6.0
+            };
             w.put(|| format!("P{r}_LR_NEED"), lr_need as f32 / 10.0);
             w.put(|| format!("P{r}_LR_EXTEND"), lr_extend as f32 / 6.0);
             w.put(|| format!("P{r}_LR_REACHABLE"), lr_reachable as u8 as f32);
@@ -921,6 +988,21 @@ impl ObservationSpace {
             w.put(|| format!("P{r}_LA_REACHABLE"), la_reachable as u8 as f32);
             w.put(|| format!("P{r}_VPS_WITH_AWARDS"), (vps + swing) as f32 / 15.0);
             w.put(|| format!("P{r}_AWARD_SWING"), swing as f32 / 4.0);
+            w.put(|| format!("P{r}_PORT_FIT"), fit / 15.0);
+            w.put(|| format!("P{r}_TOP_PIPS"), pips[top] / 15.0);
+            w.put(|| format!("P{r}_TOP_DISCOUNT"), discount(color, top) as f32 / 2.0);
+            w.put(|| format!("P{r}_TOP_PORT_REACH"), port_reach);
+        }
+        // Per node: the observer's port target, and the cuts it could make now.
+        let mine = b.network_bits(me);
+        let my_dist = road_distances(b, me, 6);
+        for nd in 0..n_land {
+            let has_top_port = map.port_nodes.iter().any(|(res, nodes)| res.map(|x| x.idx()) == Some(my_top) && nodes.contains(&(nd as NodeId)));
+            w.put(|| format!("NODE{nd}_TOP_PORT"), (has_top_port && b.buildings[nd].is_none()) as u8 as f32);
+            let other_roads = map.node_edges[nd].iter().filter(|&&(_, e)| b.roads[e].is_some_and(|c| c != me)).count();
+            let cut_target = other_roads >= 2 && b.buildings[nd].is_none() && b.buildable[nd];
+            let cut = if !cut_target { 0.0 } else if bit_get(&mine, nd) { 1.0 } else { (6 - my_dist[nd].min(6)) as f32 / 6.0 };
+            w.put(|| format!("NODE{nd}_CUT_SPOT"), cut);
         }
         for k in 0..AWARD_MARKERS {
             w.put(|| format!("AWARD_BLOCK_{k}"), 1.0);
@@ -1664,6 +1746,15 @@ pub fn symmetries(map: &CatanMap, obs: &ObservationSpace, act: &ActionSpace) -> 
                 for (n, &m) in node.iter().enumerate() {
                     for j in 0..RELATION_PER_NODE {
                         o[o_q + m * RELATION_PER_NODE + j] = o_q + n * RELATION_PER_NODE + j;
+                    }
+                }
+            }
+            if let Some(o_a) = award_offset_of(obs) {
+                // Per-seat entries are symmetric; the per-node part moves with the nodes.
+                let base = o_a + MAX_PLAYERS * AWARD_PER_PLAYER;
+                for (n, &m) in node.iter().enumerate() {
+                    for j in 0..AWARD_PER_NODE {
+                        o[base + m * AWARD_PER_NODE + j] = base + n * AWARD_PER_NODE + j;
                     }
                 }
             }

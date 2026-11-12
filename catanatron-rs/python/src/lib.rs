@@ -473,7 +473,7 @@ fn net_forward<'py>(py: Python<'py>, path: &str, obs: &[u8]) -> PyResult<(Bound<
 #[pyfunction]
 #[pyo3(signature = (net, games, seed, threads=0, sims_full=200, sims_fast=32, p_full=0.25, sims_placement=0,
                     temp_moves=15, root_noise=0.25, dirichlet_alpha=0.3, c_puct=1.5, fpu_reduction=0.1,
-                    escalate_gap=0.0, entropy_budget=false, kl_escalate=false, admit_kl=0.0, focus_sims=0, endgame_vp=0, endgame_branches=0, opening_branches=0, placement_forks=0, placement_temp=1.0, placement_uniform=0.0, fork_settlements_only=false, placement_margin=0.0, placement_flatten=0.0, placement_horizon_turns=0, placement_playouts=12, placement_horizon_tau=0.2, placement_horizon_policy=false, placement_fork_weights=vec![1.0, 1.0, 1.0, 1.0], move_forks=0, move_fork_temp=1.0, move_fork_uniform=0.0, sibling_labels=false, pool_board_share=1.0, random_share=0.0, random_eps=1.0, scarce_ows_share=0.0, port_start_share=0.0, margin_weight=0.0, speed_weight=0.0, speed_turns=100.0, gumbel_m=0, pool=Vec::new(), pool_share=0.0, opening_net=None, map_type="BASE", vps_to_win=10, discard_limit=7, friendly_robber="off", dice="fair", numbers="spiral", board=None))]
+                    escalate_gap=0.0, entropy_budget=false, kl_escalate=false, admit_kl=0.0, focus_sims=0, endgame_vp=0, endgame_branches=0, opening_branches=0, placement_forks=0, placement_temp=1.0, placement_uniform=0.0, fork_settlements_only=false, placement_margin=0.0, placement_flatten=0.0, placement_horizon_turns=0, placement_playouts=12, placement_horizon_tau=0.2, placement_horizon_policy=false, midgame_horizon_turns=0, midgame_playouts=4, placement_fork_weights=vec![1.0, 1.0, 1.0, 1.0], move_forks=0, move_fork_temp=1.0, move_fork_uniform=0.0, sibling_labels=false, pool_board_share=1.0, random_share=0.0, random_eps=1.0, scarce_ows_share=0.0, port_start_share=0.0, margin_weight=0.0, speed_weight=0.0, speed_turns=100.0, gumbel_m=0, pool=Vec::new(), pool_share=0.0, opening_net=None, map_type="BASE", vps_to_win=10, discard_limit=7, friendly_robber="off", dice="fair", numbers="spiral", board=None))]
 #[allow(clippy::too_many_arguments)]
 fn self_play<'py>(
     py: Python<'py>,
@@ -508,6 +508,8 @@ fn self_play<'py>(
     placement_playouts: u32,
     placement_horizon_tau: f32,
     placement_horizon_policy: bool,
+    midgame_horizon_turns: u32,
+    midgame_playouts: u32,
     placement_fork_weights: Vec<f32>,
     move_forks: u32,
     move_fork_temp: f32,
@@ -571,7 +573,7 @@ fn self_play<'py>(
         return Err(PyValueError::new_err("placement_fork_weights needs 4 entries (one per settlement decision)"));
     }
     let placement_fork_weights = [placement_fork_weights[0], placement_fork_weights[1], placement_fork_weights[2], placement_fork_weights[3]];
-    let cfg = SelfPlayConfig { sims_full, sims_fast, sims_placement, p_full, temp_moves, root_noise, dirichlet_alpha, c_puct, fpu_reduction, escalate_gap, entropy_budget, kl_escalate, admit_kl, focus_sims, endgame_vp, endgame_branches, opening_branches, placement_forks, placement_temp, placement_uniform, fork_settlements_only, placement_margin, placement_flatten, placement_horizon_turns, placement_playouts, placement_horizon_tau, placement_horizon_policy, placement_fork_weights, move_forks, move_fork_temp, move_fork_uniform, sibling_labels, pool_board_share, pool_seeds, random_share, random_eps, utility, gumbel_m, game };
+    let cfg = SelfPlayConfig { sims_full, sims_fast, sims_placement, p_full, temp_moves, root_noise, dirichlet_alpha, c_puct, fpu_reduction, escalate_gap, entropy_budget, kl_escalate, admit_kl, focus_sims, endgame_vp, endgame_branches, opening_branches, placement_forks, placement_temp, placement_uniform, fork_settlements_only, placement_margin, placement_flatten, placement_horizon_turns, placement_playouts, placement_horizon_tau, placement_horizon_policy, midgame_horizon_turns, midgame_playouts, placement_fork_weights, move_forks, move_fork_temp, move_fork_uniform, sibling_labels, pool_board_share, pool_seeds, random_share, random_eps, utility, gumbel_m, game };
     let data = py
         .detach(|| catanatron::selfplay::self_play_with_pool(net, &pool_nets, pool_share, games, seed, threads, &cfg))
         .map_err(PyValueError::new_err)?;
@@ -590,6 +592,9 @@ fn self_play<'py>(
     d.set_item("endgame", raw_bytes(py, &data.endgame))?;
     d.set_item("opening", raw_bytes(py, &data.opening))?;
     d.set_item("focus", raw_bytes(py, &data.focus))?;
+    d.set_item("kind", raw_bytes(py, &data.kind))?;
+    d.set_item("horizon", f32_bytes(py, &data.horizon))?;
+    d.set_item("kind_names", catanatron::selfplay::KIND_NAMES.to_vec())?;
     d.set_item("game", raw_bytes(py, &data.game))?;
     d.set_item("focused", data.focused)?;
     d.set_item("random_games", data.random_games)?;
@@ -627,6 +632,26 @@ fn board_topology(map_type: &str) -> PyResult<(Vec<Vec<usize>>, Vec<(u32, u32)>)
         .map(|i| (map.edges[i].0 as u32, map.edges[i].1 as u32))
         .collect();
     Ok((node_tiles, edges))
+}
+
+/// The settlement action slot of every land node (node order), for the spot head's tables.
+#[pyfunction]
+#[pyo3(signature = (map_type="BASE"))]
+fn settlement_slots(map_type: &str) -> PyResult<Vec<u32>> {
+    use catanatron::map::{build_map, NumberPlacement};
+    let map = build_map(self::map_type(map_type)?, NumberPlacement::OfficialSpiral, &mut catanatron::rng::Rng::new(0));
+    Ok(catanatron::encoding::ActionSpace::new(&map).settlement_slots())
+}
+
+/// Board-structured action slots for the board heads' tables: (settlement [node], city [node],
+/// road [land edge in `board_topology` order], robber [land tile][victim 0..4]).
+#[pyfunction]
+#[pyo3(signature = (map_type="BASE"))]
+#[allow(clippy::type_complexity)]
+fn board_slots(map_type: &str) -> PyResult<(Vec<u32>, Vec<u32>, Vec<u32>, Vec<Vec<u32>>)> {
+    use catanatron::map::{build_map, NumberPlacement};
+    let map = build_map(self::map_type(map_type)?, NumberPlacement::OfficialSpiral, &mut catanatron::rng::Rng::new(0));
+    Ok(catanatron::encoding::ActionSpace::new(&map).board_slots())
 }
 
 /// One of our boards (`board` as `with_board` takes it, e.g. "seed:N") in the
@@ -702,6 +727,8 @@ fn catanatron_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(play_bots_by_seat, m)?)?;
     m.add_function(wrap_pyfunction!(self_play, m)?)?;
     m.add_function(wrap_pyfunction!(board_topology, m)?)?;
+    m.add_function(wrap_pyfunction!(settlement_slots, m)?)?;
+    m.add_function(wrap_pyfunction!(board_slots, m)?)?;
     m.add_function(wrap_pyfunction!(board_symmetries, m)?)?;
     Ok(())
 }

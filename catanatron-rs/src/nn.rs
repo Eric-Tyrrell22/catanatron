@@ -2,7 +2,7 @@
 //! so search can call the network without leaving Rust.
 //!
 //! File format (little-endian), written by `python/export.py`:
-//!   b"CTNN", u32 version (1 or 2), u32 obs_size, u32 action_size,
+//!   b"CTNN", u32 version (1 to 4), u32 obs_size, u32 action_size,
 //!   u32 num_tensors, then per tensor: u32 rows, u32 cols, rows*cols f32.
 //! Tensors, in order: trunk layers (weight, bias)..., policy (weight, bias),
 //! value (weight, bias). Weights are PyTorch's [out, in]; biases [1, out].
@@ -493,9 +493,96 @@ pub struct PolicyValueNet {
     policy_rows: Vec<u16>,
     value: Layer,
     spots: Option<SpotBranch>,
+    /// The shared per-spot settlement head (version 3), see `SpotHead`.
+    spot_head: Option<SpotHead>,
+    /// The mid-game board heads (version 4), see `BoardHeads`.
+    board_heads: Option<BoardHeads>,
     /// A separate network for the initial placements (`Evaluator` uses it
     /// while `is_initial_build_phase`); it may have its own input layout.
     pub opening: Option<Arc<PolicyValueNet>>,
+}
+
+/// Version 3 (python/model.py `SpotHead`): settlement logits from one small
+/// network run on every land node. Per node: ReLU(enc(its observation
+/// entries) + ctx(trunk's last layer)); then ReLU(mix([a, mean of a over the
+/// neighbours at road distance 1, at distance 2])) + a; then `out`, centred
+/// over the nodes (the common offset is invisible to the softmax at placements
+/// and otherwise drifts), added to the node's settlement logit. Tables: node_feat [N][F] (obs_size = zero
+/// slot), adj1 [N][3] and adj2 [N][K] (N = no neighbour), slot [N].
+#[derive(Clone, Debug)]
+struct SpotHead {
+    node_feat: Vec<Vec<u32>>,
+    adj1: Vec<Vec<u32>>,
+    adj2: Vec<Vec<u32>>,
+    slot: Vec<u32>,
+    /// Per action slot: the node whose score it carries, or u32::MAX.
+    node_of_slot: Vec<u32>,
+    enc: Layer,
+    ctx: Layer,
+    mix: Layer,
+    out: Layer,
+}
+
+/// Reusable buffers for the spot head.
+#[derive(Default)]
+struct HeadScratch {
+    x: Vec<f32>,
+    ctx: Vec<f32>,
+    /// [(N + 1) * width]: node activations, the last row zeros (padding).
+    a: Vec<f32>,
+    input: Vec<f32>,
+    tmp: Vec<f32>,
+    nz: Vec<(u32, f32)>,
+    hidden: Vec<(u32, f32)>,
+    scores: Vec<f32>,
+    o: Vec<f32>,
+    z: Vec<f32>,
+}
+
+impl SpotHead {
+    /// Node scores into `s.scores` from the observation's nonzero entries and
+    /// the trunk's last layer (its ReLU survivors, sparse).
+    fn run(&self, obs_nz: &[(u32, f32)], obs_size: usize, hidden: &[(u32, f32)], s: &mut HeadScratch) {
+        let HeadScratch { x, ctx, a, input, tmp, nz, scores, o, .. } = s;
+        spot_input(obs_nz, obs_size, x);
+        self.ctx.forward(hidden, ctx);
+        let (n, w) = (self.node_feat.len(), self.enc.outputs);
+        a.clear();
+        a.resize((n + 1) * w, 0.0);
+        for i in 0..n {
+            input.clear();
+            input.extend(self.node_feat[i].iter().map(|&k| x[k as usize]));
+            dense(&self.enc, input, nz, tmp);
+            for j in 0..w {
+                a[i * w + j] = (tmp[j] + ctx[j]).max(0.0);
+            }
+        }
+        scores.clear();
+        for i in 0..n {
+            input.clear();
+            input.extend_from_slice(&a[i * w..(i + 1) * w]);
+            for adj in [&self.adj1[i], &self.adj2[i]] {
+                let count = adj.iter().filter(|&&m| (m as usize) < n).count().max(1) as f32;
+                let start = input.len();
+                input.resize(start + w, 0.0);
+                for &m in adj {
+                    let row = &a[m as usize * w..(m as usize + 1) * w];
+                    for j in 0..w {
+                        input[start + j] += row[j];
+                    }
+                }
+                input[start..].iter_mut().for_each(|v| *v /= count);
+            }
+            dense(&self.mix, input, nz, tmp);
+            for j in 0..w {
+                tmp[j] = tmp[j].max(0.0) + a[i * w + j];
+            }
+            dense(&self.out, tmp, nz, o);
+            scores.push(o[0]);
+        }
+        let mean = scores.iter().sum::<f32>() / scores.len().max(1) as f32;
+        scores.iter_mut().for_each(|v| *v -= mean);
+    }
 }
 
 impl PolicyValueNet {
@@ -619,6 +706,201 @@ impl SpotBranch {
     }
 }
 
+/// Version 4 (python/model.py `BoardHeads`): the spot head's node encoder (enc, ctx, mix) gives an
+/// embedding z per land node; settle_out / city_out score each node; edge_enc + edge_out score a land
+/// edge from [z_a + z_b, |z_a - z_b|, its EDGE entries]; tile_enc + tile_out score a tile from [mean z of
+/// its nodes, its TILE entries]. Each kind's scores are centred and added to its slots (a tile's score
+/// to every victim slot). Tables as the spot head's plus edge_nodes [E][2], edge_feat [E][Fe],
+/// tile_nodes [T][K] (N = none), tile_feat [T][Ft], city_slot [N], road_slot [E], robber_slot [T][V].
+/// A small f32 layer applied to many rows at once (the board heads: 54 nodes, 72 edges, 19 tiles per
+/// forward). Weights input-major (`w_t[i][o]`), so every inner loop is an independent-lane update over
+/// the outputs that the compiler vectorises (a dot-product reduction would not be), and zero inputs
+/// (one-hots are mostly zero) cost nothing.
+#[derive(Clone, Debug)]
+struct Dense {
+    inputs: usize,
+    outputs: usize,
+    w_t: Vec<f32>,
+    b: Vec<f32>,
+}
+
+impl Dense {
+    fn new(inputs: usize, outputs: usize, w: &[f32], b: Vec<f32>) -> Dense {
+        let mut w_t = vec![0f32; inputs * outputs];
+        for o in 0..outputs {
+            for i in 0..inputs {
+                w_t[i * outputs + o] = w[o * inputs + i];
+            }
+        }
+        Dense { inputs, outputs, w_t, b }
+    }
+
+    /// `out[r][o] = b[o] + sum_i x[r][i] * w[o][i]` for `rows` rows of `x` (row stride `inputs`).
+    fn forward_rows(&self, x: &[f32], rows: usize, out: &mut Vec<f32>) {
+        debug_assert_eq!(x.len(), rows * self.inputs);
+        let (ni, no) = (self.inputs, self.outputs);
+        out.clear();
+        out.reserve(rows * no);
+        for r in 0..rows {
+            out.extend_from_slice(&self.b);
+            let o = &mut out[r * no..(r + 1) * no];
+            for (k, &xk) in x[r * ni..(r + 1) * ni].iter().enumerate() {
+                if xk != 0.0 {
+                    let wk = &self.w_t[k * no..(k + 1) * no];
+                    for j in 0..no {
+                        o[j] += xk * wk[j];
+                    }
+                }
+            }
+        }
+    }
+
+    /// `out[o] = b[o] + sum over the sparse input of x_i * w[o][i]`.
+    fn forward_sparse(&self, x: &[(u32, f32)], out: &mut Vec<f32>) {
+        out.clear();
+        out.extend_from_slice(&self.b);
+        let no = self.outputs;
+        for &(i, v) in x {
+            let wk = &self.w_t[i as usize * no..(i as usize + 1) * no];
+            for j in 0..no {
+                out[j] += v * wk[j];
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BoardHeads {
+    node_feat: Vec<Vec<u32>>,
+    adj1: Vec<Vec<u32>>,
+    adj2: Vec<Vec<u32>>,
+    edge_nodes: Vec<Vec<u32>>,
+    edge_feat: Vec<Vec<u32>>,
+    tile_nodes: Vec<Vec<u32>>,
+    tile_feat: Vec<Vec<u32>>,
+    /// Per tile: its victim slots (the tile's score goes to each).
+    robber_slot: Vec<Vec<u32>>,
+    /// Per action slot: its index in the scores this produces (`run` fills `s.out` in that order), or u32::MAX.
+    index_of_slot: Vec<u32>,
+    /// The slots in `out` order.
+    slots: Vec<u32>,
+    enc: Dense,
+    ctx: Dense,
+    mix: Dense,
+    settle_out: Dense,
+    city_out: Dense,
+    edge_enc: Dense,
+    edge_out: Dense,
+    tile_enc: Dense,
+    tile_out: Dense,
+}
+
+impl BoardHeads {
+    /// The additions per slot of `self.slots`, into `s.scores`, from the observation's nonzero entries
+    /// and the trunk's last layer (sparse). Dense f32 passes over all nodes / edges / tiles at once.
+    fn run(&self, obs_nz: &[(u32, f32)], obs_size: usize, hidden: &[(u32, f32)], s: &mut HeadScratch) {
+        let HeadScratch { x, ctx, a, input, tmp, scores, o, z, .. } = s;
+        spot_input(obs_nz, obs_size, x);
+        self.ctx.forward_sparse(hidden, ctx);
+        let (n, w) = (self.node_feat.len(), self.enc.outputs);
+        // Node encoder over all nodes: gather [n][f], one pass, + ctx, ReLU; row n stays zero (padding).
+        input.clear();
+        for feat in &self.node_feat {
+            input.extend(feat.iter().map(|&k| x[k as usize]));
+        }
+        self.enc.forward_rows(input, n, tmp);
+        a.clear();
+        a.resize((n + 1) * w, 0.0);
+        for i in 0..n {
+            for j in 0..w {
+                a[i * w + j] = (tmp[i * w + j] + ctx[j]).max(0.0);
+            }
+        }
+        // Message passing: [a, mean over adj1, mean over adj2] -> mix -> ReLU, + a.
+        input.clear();
+        input.resize(n * 3 * w, 0.0);
+        for i in 0..n {
+            let row = &mut input[i * 3 * w..(i + 1) * 3 * w];
+            row[..w].copy_from_slice(&a[i * w..(i + 1) * w]);
+            for (k, adj) in [&self.adj1[i], &self.adj2[i]].into_iter().enumerate() {
+                let count = adj.iter().filter(|&&m| (m as usize) < n).count().max(1) as f32;
+                let dst = &mut row[(k + 1) * w..(k + 2) * w];
+                for &m in adj {
+                    let src = &a[m as usize * w..(m as usize + 1) * w];
+                    for j in 0..w {
+                        dst[j] += src[j];
+                    }
+                }
+                dst.iter_mut().for_each(|v| *v /= count);
+            }
+        }
+        self.mix.forward_rows(input, n, tmp);
+        z.clear();
+        z.resize((n + 1) * w, 0.0);
+        for i in 0..n * w {
+            z[i] = tmp[i].max(0.0) + a[i];
+        }
+        scores.clear();
+        let centred = |scores: &mut Vec<f32>, start: usize| {
+            let mean = scores[start..].iter().sum::<f32>() / (scores.len() - start).max(1) as f32;
+            scores[start..].iter_mut().for_each(|v| *v -= mean);
+        };
+        // Settlements, then cities, per node.
+        for head in [&self.settle_out, &self.city_out] {
+            let start = scores.len();
+            head.forward_rows(&z[..n * w], n, o);
+            scores.extend_from_slice(o);
+            centred(scores, start);
+        }
+        // Roads: [z_a + z_b, |z_a - z_b|, edge entries] per land edge.
+        let (ne, fe) = (self.edge_nodes.len(), self.edge_feat.first().map_or(0, |f| f.len()));
+        input.clear();
+        for (e, nodes) in self.edge_nodes.iter().enumerate() {
+            let (p, q) = (nodes[0] as usize * w, nodes[1] as usize * w);
+            for j in 0..w {
+                input.push(z[p + j] + z[q + j]);
+            }
+            for j in 0..w {
+                input.push((z[p + j] - z[q + j]).abs());
+            }
+            input.extend(self.edge_feat[e].iter().map(|&k| x[k as usize]));
+        }
+        debug_assert_eq!(input.len(), ne * (2 * w + fe));
+        self.edge_enc.forward_rows(input, ne, tmp);
+        tmp.iter_mut().for_each(|v| *v = v.max(0.0));
+        let start = scores.len();
+        self.edge_out.forward_rows(tmp, ne, o);
+        scores.extend_from_slice(o);
+        centred(scores, start);
+        // Robber: [mean z over the tile's nodes, tile entries] per tile; one score per victim slot.
+        let nt = self.tile_nodes.len();
+        input.clear();
+        for (t, nodes) in self.tile_nodes.iter().enumerate() {
+            let count = nodes.iter().filter(|&&m| (m as usize) < n).count().max(1) as f32;
+            let start = input.len();
+            input.resize(start + w, 0.0);
+            for &m in nodes {
+                let src = &z[m as usize * w..(m as usize + 1) * w]; // row n is zeros
+                for j in 0..w {
+                    input[start + j] += src[j];
+                }
+            }
+            input[start..].iter_mut().for_each(|v| *v /= count);
+            input.extend(self.tile_feat[t].iter().map(|&k| x[k as usize]));
+        }
+        self.tile_enc.forward_rows(input, nt, tmp);
+        tmp.iter_mut().for_each(|v| *v = v.max(0.0));
+        self.tile_out.forward_rows(tmp, nt, o);
+        let mean = o.iter().sum::<f32>() / nt.max(1) as f32;
+        for (t, slots) in self.robber_slot.iter().enumerate() {
+            for _ in slots {
+                scores.push(o[t] - mean);
+            }
+        }
+        debug_assert_eq!(scores.len(), self.slots.len());
+    }
+}
+
 /// Reusable scratch buffers for `PolicyValueNet::forward`.
 #[derive(Default)]
 pub struct Scratch {
@@ -628,6 +910,7 @@ pub struct Scratch {
     obs_nz: Vec<(u32, f32)>,
     spot: SpotScratch,
     join: Vec<f32>,
+    head: HeadScratch,
 }
 
 /// Reusable buffers for `PolicyValueNet::forward_batch`.
@@ -646,6 +929,7 @@ pub struct BatchScratch {
     /// Per position: the spot branch's join output and tower value.
     join: Vec<Vec<f32>>,
     tower: Vec<f32>,
+    head: HeadScratch,
 }
 
 impl BatchScratch {
@@ -757,6 +1041,29 @@ fn read_layers(r: &mut impl Read, n: usize) -> std::io::Result<Vec<Layer>> {
     Ok(layers)
 }
 
+/// `n` tensors (weight, bias pairs) as dense f32 layers.
+fn read_dense(r: &mut impl Read, n: usize) -> std::io::Result<Vec<Dense>> {
+    let mut tensors = Vec::with_capacity(n);
+    for _ in 0..n {
+        let rows = read_u32(r)? as usize;
+        let cols = read_u32(r)? as usize;
+        let mut data = vec![0f32; rows * cols];
+        for x in data.iter_mut() {
+            *x = read_f32(r)?;
+        }
+        tensors.push((rows, cols, data));
+    }
+    let mut layers = Vec::new();
+    let mut it = tensors.into_iter();
+    while let (Some((out, inp, w)), Some((_, bout, b))) = (it.next(), it.next()) {
+        if bout != out {
+            return Err(bad(format!("bias length {bout} doesn't match {out} outputs")));
+        }
+        layers.push(Dense::new(inp, out, &w, b));
+    }
+    Ok(layers)
+}
+
 /// An index table: (dims, entries).
 fn read_table(r: &mut impl Read) -> std::io::Result<(Vec<usize>, Vec<u32>)> {
     let ndim = read_u32(r)? as usize;
@@ -805,6 +1112,104 @@ fn read_spots(r: &mut impl Read, obs_size: usize) -> std::io::Result<SpotBranch>
     Ok(SpotBranch { node_feat, node_edge_feat, tile_feat, node_tiles, global_feat, tile, node1, node_tiles_in, node2, join, tower, tower_out, flat_value_scale })
 }
 
+fn read_spot_head(r: &mut impl Read, obs_size: usize, action_size: usize) -> std::io::Result<SpotHead> {
+    let (d, nf) = read_table(r)?;
+    let node_feat = rows(&d, &nf, 2)?;
+    let (d, a1) = read_table(r)?;
+    let adj1 = rows(&d, &a1, 2)?;
+    let (d, a2) = read_table(r)?;
+    let adj2 = rows(&d, &a2, 2)?;
+    let (d, slot) = read_table(r)?;
+    if d.len() != 1 {
+        return Err(bad("slot table needs 1 dim".into()));
+    }
+    let n = read_u32(r)? as usize;
+    if n != 8 {
+        return Err(bad(format!("spot head has {n} tensors, expected 8")));
+    }
+    let mut l = read_layers(r, n)?.into_iter();
+    let mut next = || l.next().unwrap();
+    let (enc, ctx, mix, out) = (next(), next(), next(), next());
+    let nodes = node_feat.len();
+    if adj1.len() != nodes || adj2.len() != nodes || slot.len() != nodes {
+        return Err(bad("spot head tables disagree on the node count".into()));
+    }
+    if !node_feat.iter().flatten().all(|&v| (v as usize) <= obs_size) || !adj1.iter().chain(&adj2).flatten().all(|&v| (v as usize) <= nodes)
+        || !slot.iter().all(|&v| (v as usize) < action_size) {
+        return Err(bad("spot head index out of range".into()));
+    }
+    let w = enc.outputs;
+    if ctx.outputs != w || mix.inputs != 3 * w || mix.outputs != w || out.inputs != w || out.outputs != 1 || node_feat.iter().any(|f| f.len() != enc.inputs) {
+        return Err(bad("spot head shapes don't match".into()));
+    }
+    let mut node_of_slot = vec![u32::MAX; action_size];
+    for (i, &s) in slot.iter().enumerate() {
+        node_of_slot[s as usize] = i as u32;
+    }
+    Ok(SpotHead { node_feat, adj1, adj2, slot, node_of_slot, enc, ctx, mix, out })
+}
+
+fn read_board_heads(r: &mut impl Read, obs_size: usize, action_size: usize) -> std::io::Result<BoardHeads> {
+    fn t2(r: &mut impl Read) -> std::io::Result<Vec<Vec<u32>>> {
+        let (d, v) = read_table(r)?;
+        rows(&d, &v, 2)
+    }
+    fn t1(r: &mut impl Read) -> std::io::Result<Vec<u32>> {
+        let (d, v) = read_table(r)?;
+        if d.len() != 1 {
+            return Err(bad("expected a 1-dim table".into()));
+        }
+        Ok(v)
+    }
+    let node_feat = t2(r)?;
+    let adj1 = t2(r)?;
+    let adj2 = t2(r)?;
+    let settle_slot = t1(r)?;
+    let edge_nodes = t2(r)?;
+    let edge_feat = t2(r)?;
+    let tile_nodes = t2(r)?;
+    let tile_feat = t2(r)?;
+    let city_slot = t1(r)?;
+    let road_slot = t1(r)?;
+    let robber_slot = t2(r)?;
+    let n = read_u32(r)? as usize;
+    if n != 18 {
+        return Err(bad(format!("board heads have {n} tensors, expected 18")));
+    }
+    let mut l = read_dense(r, n)?.into_iter();
+    let mut next = || l.next().unwrap();
+    let (enc, ctx, mix, settle_out, city_out, edge_enc, edge_out, tile_enc, tile_out) = (next(), next(), next(), next(), next(), next(), next(), next(), next());
+    let nodes = node_feat.len();
+    let w = enc.outputs;
+    let ok_shapes = adj1.len() == nodes && adj2.len() == nodes && settle_slot.len() == nodes && city_slot.len() == nodes
+        && edge_nodes.len() == edge_feat.len() && road_slot.len() == edge_nodes.len() && tile_nodes.len() == tile_feat.len() && robber_slot.len() == tile_nodes.len()
+        && ctx.outputs == w && mix.inputs == 3 * w && mix.outputs == w && settle_out.inputs == w && city_out.inputs == w
+        && edge_enc.inputs == 2 * w + edge_feat.first().map_or(0, |f| f.len()) && edge_enc.outputs == w && edge_out.inputs == w
+        && tile_enc.inputs == w + tile_feat.first().map_or(0, |f| f.len()) && tile_enc.outputs == w && tile_out.inputs == w
+        && [&settle_out, &city_out, &edge_out, &tile_out].iter().all(|l| l.outputs == 1) && node_feat.iter().all(|f| f.len() == enc.inputs)
+        && edge_nodes.iter().all(|e| e.len() == 2);
+    if !ok_shapes {
+        return Err(bad("board head shapes don't match".into()));
+    }
+    let in_obs = |v: &u32| (*v as usize) <= obs_size;
+    if !node_feat.iter().chain(&edge_feat).chain(&tile_feat).flatten().all(in_obs)
+        || !adj1.iter().chain(&adj2).chain(&tile_nodes).flatten().all(|&v| (v as usize) <= nodes)
+        || !edge_nodes.iter().flatten().all(|&v| (v as usize) < nodes)
+        || !settle_slot.iter().chain(&city_slot).chain(&road_slot).chain(robber_slot.iter().flatten()).all(|&v| (v as usize) < action_size) {
+        return Err(bad("board head index out of range".into()));
+    }
+    let slots: Vec<u32> = settle_slot.iter().chain(&city_slot).chain(&road_slot).chain(robber_slot.iter().flatten()).copied().collect();
+    let mut index_of_slot = vec![u32::MAX; action_size];
+    for (i, &s) in slots.iter().enumerate() {
+        if index_of_slot[s as usize] != u32::MAX {
+            return Err(bad("a slot appears twice in the board heads' tables".into()));
+        }
+        index_of_slot[s as usize] = i as u32;
+    }
+    Ok(BoardHeads { node_feat, adj1, adj2, edge_nodes, edge_feat, tile_nodes, tile_feat, robber_slot, index_of_slot, slots,
+                    enc, ctx, mix, settle_out, city_out, edge_enc, edge_out, tile_enc, tile_out })
+}
+
 impl PolicyValueNet {
     pub fn load(path: &str) -> Result<PolicyValueNet, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
@@ -820,7 +1225,7 @@ impl PolicyValueNet {
             return Err("not a CTNN network file".into());
         }
         let version = read_u32(&mut r).map_err(io)?;
-        if version != 1 && version != 2 {
+        if !(1..=4).contains(&version) {
             return Err(format!("unsupported network file version {version}"));
         }
         let obs_size = read_u32(&mut r).map_err(io)? as usize;
@@ -831,6 +1236,8 @@ impl PolicyValueNet {
         }
         let mut layers = read_layers(&mut r, n).map_err(io)?;
         let spots = if version == 2 { Some(read_spots(&mut r, obs_size).map_err(io)?) } else { None };
+        let spot_head = if version == 3 { Some(read_spot_head(&mut r, obs_size, action_size).map_err(io)?) } else { None };
+        let board_heads = if version == 4 { Some(read_board_heads(&mut r, obs_size, action_size).map_err(io)?) } else { None };
         if !r.is_empty() {
             return Err("trailing bytes after tensors".into());
         }
@@ -852,8 +1259,18 @@ impl PolicyValueNet {
                 return Err("spot branch shapes don't match the trunk".into());
             }
         }
+        if let Some(h) = &spot_head {
+            if h.ctx.inputs != width {
+                return Err("spot head context doesn't match the trunk width".into());
+            }
+        }
+        if let Some(h) = &board_heads {
+            if h.ctx.inputs != width {
+                return Err("board heads' context doesn't match the trunk width".into());
+            }
+        }
         let policy_rows = policy.rows();
-        Ok(PolicyValueNet { obs_size, action_size, trunk, policy, policy_rows, value, spots, opening: None })
+        Ok(PolicyValueNet { obs_size, action_size, trunk, policy, policy_rows, value, spots, spot_head, board_heads, opening: None })
     }
 
     /// Policy logits (unmasked) into `logits`; returns the value estimate.
@@ -903,6 +1320,41 @@ impl PolicyValueNet {
             scratch.gather_relu(n);
         }
         self.policy.forward_batch(&scratch.union, &scratch.xg, n, logits);
+        if let Some(h) = &self.spot_head {
+            // Each position's hidden layer (its positive entries) from the gathered union.
+            for b in 0..n {
+                scratch.head.hidden.clear();
+                for (u, &i) in scratch.union.iter().enumerate() {
+                    let v = scratch.xg[u * n + b];
+                    if v > 0.0 {
+                        scratch.head.hidden.push((i, v));
+                    }
+                }
+                let hidden = std::mem::take(&mut scratch.head.hidden);
+                h.run(obs_nz[b], self.obs_size, &hidden, &mut scratch.head);
+                scratch.head.hidden = hidden;
+                for (&s, &v) in h.slot.iter().zip(&scratch.head.scores) {
+                    logits[b][s as usize] += v;
+                }
+            }
+        }
+        if let Some(h) = &self.board_heads {
+            for b in 0..n {
+                scratch.head.hidden.clear();
+                for (u, &i) in scratch.union.iter().enumerate() {
+                    let v = scratch.xg[u * n + b];
+                    if v > 0.0 {
+                        scratch.head.hidden.push((i, v));
+                    }
+                }
+                let hidden = std::mem::take(&mut scratch.head.hidden);
+                h.run(obs_nz[b], self.obs_size, &hidden, &mut scratch.head);
+                scratch.head.hidden = hidden;
+                for (&s, &v) in h.slots.iter().zip(&scratch.head.scores) {
+                    logits[b][s as usize] += v;
+                }
+            }
+        }
         self.value.forward_batch(&scratch.union, &scratch.xg, n, &mut scratch.v);
         for (b, (out, v)) in values.iter_mut().zip(&scratch.v[..n]).enumerate() {
             *out = match &self.spots {
@@ -917,6 +1369,20 @@ impl PolicyValueNet {
     pub fn forward_sparse(&self, obs_nz: &[(u32, f32)], scratch: &mut Scratch, logits: &mut Vec<f32>) -> f32 {
         let (n, tower) = self.trunk_sparse(obs_nz, scratch);
         self.policy.forward(&scratch.nz[..n], logits);
+        if let Some(h) = &self.spot_head {
+            let Scratch { nz, head, .. } = &mut *scratch;
+            h.run(obs_nz, self.obs_size, &nz[..n], head);
+            for (&s, &v) in h.slot.iter().zip(&head.scores) {
+                logits[s as usize] += v;
+            }
+        }
+        if let Some(h) = &self.board_heads {
+            let Scratch { nz, head, .. } = &mut *scratch;
+            h.run(obs_nz, self.obs_size, &nz[..n], head);
+            for (&s, &v) in h.slots.iter().zip(&head.scores) {
+                logits[s as usize] += v;
+            }
+        }
         self.value(n, tower, scratch)
     }
 
@@ -928,6 +1394,34 @@ impl PolicyValueNet {
     pub fn forward_sparse_for(&self, obs_nz: &[(u32, f32)], slots: &[u32], scratch: &mut Scratch, logits: &mut Vec<f32>) -> f32 {
         let (n, tower) = self.trunk_sparse(obs_nz, scratch);
         self.policy_subset(&scratch.nz[..n], slots, logits);
+        if let Some(h) = &self.spot_head {
+            if slots.iter().any(|&s| s != u32::MAX && h.node_of_slot[s as usize] != u32::MAX) {
+                let Scratch { nz, head, .. } = &mut *scratch;
+                h.run(obs_nz, self.obs_size, &nz[..n], head);
+                for (l, &s) in logits.iter_mut().zip(slots) {
+                    if s != u32::MAX {
+                        let node = h.node_of_slot[s as usize];
+                        if node != u32::MAX {
+                            *l += head.scores[node as usize];
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(h) = &self.board_heads {
+            if slots.iter().any(|&s| s != u32::MAX && h.index_of_slot[s as usize] != u32::MAX) {
+                let Scratch { nz, head, .. } = &mut *scratch;
+                h.run(obs_nz, self.obs_size, &nz[..n], head);
+                for (l, &s) in logits.iter_mut().zip(slots) {
+                    if s != u32::MAX {
+                        let i = h.index_of_slot[s as usize];
+                        if i != u32::MAX {
+                            *l += head.scores[i as usize];
+                        }
+                    }
+                }
+            }
+        }
         self.value(n, tower, scratch)
     }
 

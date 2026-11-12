@@ -11,7 +11,7 @@ use catanatron::rng::Rng;
 use catanatron::state::DiceMode;
 use catanatron::*;
 
-const NAMES: [&str; AWARD_PER_PLAYER] = ["lr_need", "lr_ext", "lr_ok", "la_need", "la_poss", "la_ok", "vps+aw", "swing"];
+const NAMES: [&str; AWARD_PER_PLAYER] = ["lr_need", "lr_ext", "lr_ok", "la_need", "la_poss", "la_ok", "vps+aw", "swing", "pfit", "toppip", "topdsc", "preach"];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -41,7 +41,11 @@ fn main() {
             let s = &game.state;
             let p = s.player(mover);
             let row = |r: usize| (0..AWARD_PER_PLAYER).map(|j| format!("{:>7.2}", obs[off + r * AWARD_PER_PLAYER + j])).collect::<String>();
-            println!("{:>5} {:>6?} | {} | {} | mover: {} vp, road {} ({}), army {}, knights {}, roads left {}",
+            let base = off + 4 * AWARD_PER_PLAYER;
+            let n_land = map.land_nodes.iter().filter(|&&x| x).count();
+            let ports = (0..n_land).filter(|&nd| obs[base + nd * 2] > 0.5).count();
+            let cuts = (0..n_land).filter(|&nd| obs[base + nd * 2 + 1] > 0.0).count();
+            println!("{:>5} {:>6?} | {} | {} | top-port nodes {ports}, cut targets {cuts} | mover: {} vp, road {} ({}), army {}, knights {}, roads left {}",
                      s.num_turns, mover, row(0), row(1), p.victory_points, p.longest_road_length, p.has_road, p.has_army, p.played_dev_cards[0], p.roads_available);
         }
         let action = if actions.len() == 1 { actions[0] } else if mover == COLORS[0] { a.decide(&game, &actions) } else { b.decide(&game, &actions) };

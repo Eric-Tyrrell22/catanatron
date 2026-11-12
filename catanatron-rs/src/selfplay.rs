@@ -158,6 +158,11 @@ pub struct SelfPlayConfig {
     /// value head improves the search target too (the KataGo / MuZero split:
     /// policy from the strongest search, value from the least noisy estimate).
     pub placement_horizon_policy: bool,
+    /// Mid-game value label: the mean network value for the mover `midgame_horizon_turns` turns on along
+    /// `midgame_playouts` network-only playouts from each recorded position (0 = off). The learner mixes it
+    /// into the value target (`--midgame-horizon-weight`), as the opening's horizon label does at placements.
+    pub midgame_horizon_turns: u32,
+    pub midgame_playouts: u32,
     /// With `fork_settlements_only`: relative weight of each settlement decision
     /// (0..3 in placement order) for choosing which one a placement fork replays
     /// (all 1 = cycle through them; the learner sets these from the forks'
@@ -229,6 +234,10 @@ pub struct SelfPlayData {
     pub opening: Vec<u8>,
     /// `[n]`: 1 for a focus decision (see `SelfPlayConfig::focus_sims`).
     pub focus: Vec<u8>,
+    /// `[n]`: the kind of the action played (`kind_code`, named by `KIND_NAMES`).
+    pub kind: Vec<u8>,
+    /// `[n]`: the mid-game horizon value label for the mover (NaN when not computed: placements, or off).
+    pub horizon: Vec<f32>,
     /// Games against the noisy opponent (`random_share`).
     pub random_games: u64,
     /// Games won by the first player to move, by the second, and with no winner.
@@ -291,6 +300,8 @@ impl SelfPlayData {
         self.endgame.extend(other.endgame);
         self.opening.extend(other.opening);
         self.focus.extend(other.focus);
+        self.kind.extend(other.kind);
+        self.horizon.extend(other.horizon);
         self.random_games += other.random_games;
         for (a, b) in self.results.iter_mut().zip(other.results) {
             *a += b;
@@ -427,6 +438,41 @@ fn horizon_targets(ctx: &mut Ctx, game: &Game, actions: &[Action], rng: &mut Rng
     (target, q, prior, forwards)
 }
 
+/// The mid-game horizon label: the mean network value for the current mover `cfg.midgame_horizon_turns`
+/// turns on, over `cfg.midgame_playouts` network-only playouts from `game` (fresh dice each); a game that
+/// ends inside the horizon contributes its result. Returns (label, forwards spent).
+fn midgame_horizon_value(ctx: &mut Ctx, game: &Game, rng: &mut Rng) -> (f32, u64) {
+    let (turns, playouts) = (ctx.cfg.midgame_horizon_turns, ctx.cfg.midgame_playouts.max(1));
+    let me = game.state.current_color();
+    let n_players = game.state.colors.len() as f32;
+    let stop = game.state.num_turns + turns;
+    let mut forwards = 0u64;
+    let mut sum = 0.0f32;
+    for _ in 0..playouts {
+        let mut g = game.copy_without_history();
+        g.state.rng = Rng::new(rng.next_u64());
+        while !g.is_over() && g.state.num_turns < stop {
+            let legal = g.playable_actions.clone();
+            let pick = if legal.len() == 1 {
+                legal[0]
+            } else {
+                let (p, _) = ctx.eval.evaluate(&g);
+                forwards += 1;
+                legal[(0..p.len()).max_by(|&x, &y| p[x].total_cmp(&p[y])).unwrap()]
+            };
+            g.execute(pick).expect("legal");
+        }
+        sum += if g.is_over() {
+            if g.winning_color() == Some(me) { 1.0 } else { -1.0 / (n_players - 1.0) }
+        } else {
+            let (_, v) = ctx.eval.evaluate(&g);
+            forwards += 1;
+            if g.state.current_color() == me { v } else { -v / (n_players - 1.0) }
+        };
+    }
+    (sum / playouts as f32, forwards)
+}
+
 fn completed_q_target(stats: &[(f32, u32, Option<f32>)], root_value: f32, bound: f32) -> Vec<f32> {
     const C_VISIT: f32 = 50.0;
     const C_SCALE: f32 = 0.1;
@@ -460,6 +506,35 @@ fn completed_q_target(stats: &[(f32, u32, Option<f32>)], root_value: f32, bound:
 
 fn uniform(rng: &mut Rng) -> f32 {
     (rng.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// Names of the action kind codes in `SelfPlayData::kind`.
+pub const KIND_NAMES: [&str; 17] = [
+    "roll", "robber", "discard", "road", "settlement", "city", "buy_dev", "knight", "year_of_plenty", "monopoly",
+    "road_building", "maritime", "offer_trade", "accept_trade", "reject_trade", "end_turn", "other",
+];
+
+/// The code of an action's kind, see `KIND_NAMES`.
+pub fn kind_code(kind: ActionKind) -> u8 {
+    match kind {
+        ActionKind::Roll => 0,
+        ActionKind::MoveRobber { .. } => 1,
+        ActionKind::DiscardResource(_) => 2,
+        ActionKind::BuildRoad(_) => 3,
+        ActionKind::BuildSettlement(_) => 4,
+        ActionKind::BuildCity(_) => 5,
+        ActionKind::BuyDevelopmentCard => 6,
+        ActionKind::PlayKnightCard => 7,
+        ActionKind::PlayYearOfPlenty(..) => 8,
+        ActionKind::PlayMonopoly(_) => 9,
+        ActionKind::PlayRoadBuilding => 10,
+        ActionKind::MaritimeTrade { .. } => 11,
+        ActionKind::OfferTrade { .. } => 12,
+        ActionKind::AcceptTrade => 13,
+        ActionKind::RejectTrade => 14,
+        ActionKind::EndTurn => 15,
+        _ => 16,
+    }
 }
 
 /// Plays `games` 1v1 self-play games on `threads` threads. Game `i` depends
@@ -1095,7 +1170,15 @@ fn play_out(
         let total: u32 = visits.iter().sum();
         let mut fork_target = None;
 
-        if (full || admitted) && total > 0 && ctx.past != Some(mover) {
+        let recorded = (full || admitted) && total > 0 && ctx.past != Some(mover);
+        let h_mid = if recorded && !placing && ctx.cfg.midgame_horizon_turns > 0 {
+            let (h, f) = midgame_horizon_value(ctx, &game, rng);
+            out.sims += f;
+            h
+        } else {
+            f32::NAN
+        };
+        if recorded {
             out.admitted += admitted as u64;
             let (obs_space, act_space) = &ctx.spaces;
             let start = out.obs.len();
@@ -1117,6 +1200,7 @@ fn play_out(
                 q_value = *q; // the horizon value label, whichever head chose the policy target
             }
             out.q.push(q_value);
+            out.horizon.push(h_mid);
             let prior_sum: f32 = priors.iter().sum();
             out.surprise.push(
                 priors
@@ -1159,6 +1243,9 @@ fn play_out(
         } else {
             (0..visits.len()).max_by_key(|&k| visits[k]).unwrap()
         };
+        if recorded {
+            out.kind.push(kind_code(actions[pick].kind));
+        }
         let settles = placing && matches!(actions[pick].kind, ActionKind::BuildSettlement(_));
         if let Some((target, mid_game)) = fork_target {
             let settlement = if !mid_game && settles { settlements_placed } else { 255 };

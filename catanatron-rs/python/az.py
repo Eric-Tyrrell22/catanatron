@@ -37,8 +37,10 @@ import catanatron_rs
 import shards
 from catanatron_env import VecEnv, add_rule_args, board_spec, rules_from_args
 from export import to_bytes
+KIND_NAMES = ["roll", "robber", "discard", "road", "settlement", "city", "buy_dev", "knight", "year_of_plenty", "monopoly",
+              "road_building", "maritime", "offer_trade", "accept_trade", "reject_trade", "end_turn", "other"]  # selfplay::KIND_NAMES
 import spots
-from model import spot_tables_of, Policy, grow_state, revive_dead, trunk_shape
+from model import board_head_tables_of, board_head_width_of, spot_head_tables_of, spot_head_width_of, spot_tables_of, Policy, grow_state, revive_dead, trunk_shape
 
 # OBS depends on the rules (balanced dice adds deck features); set in main().
 OBS, ACTIONS = None, None  # set from a probe environment with the run's rules
@@ -70,7 +72,7 @@ class Replay:
     device, or the CPU for a buffer larger than the GPU's memory: minibatches
     then move to `train_device` as they're sampled)."""
 
-    FIELDS = ("obs", "mask", "pi", "z", "surprise", "aux", "opening", "focus", "vw")
+    FIELDS = ("obs", "mask", "pi", "z", "surprise", "aux", "opening", "focus", "vw", "kind")
 
     def save(self, path):
         """Writes the filled part of the buffer as it lies (no reordered copy:
@@ -95,6 +97,8 @@ class Replay:
         # examples don't fit and are skipped.
         order = [(oldest, total), (0, oldest)]
         for k in self.FIELDS:
+            if k not in data:  # a buffer saved before this field existed (kind: unknown = 255)
+                continue
             buf, src = getattr(self, k), data[k]
             skip, at = total - n, 0
             for lo, hi in order:
@@ -123,9 +127,20 @@ class Replay:
         # Value-loss weight per example (--value-positions: each game counts about that many positions).
         self.vw = torch.ones(capacity, dtype=torch.float16, device=device)
         self.focus_idx = torch.zeros(0, dtype=torch.long, device=device)
+        # The kind of the action played (selfplay::KIND_NAMES; 255 = unknown), for per-kind policy losses.
+        self.kind = torch.full((capacity,), 255, dtype=torch.uint8, device=device)
 
-    def add(self, obs, mask, pi, z, surprise, aux, opening, focus, vw):
+    def add(self, obs, mask, pi, z, surprise, aux, opening, focus, vw, kind=None):
         n = obs.shape[0]
+        if n > self.capacity:
+            # More rows than the buffer holds (a shard burst after a learner outage): keep the newest `capacity`.
+            # Adding them all would write some indices twice, and each field may then keep a different writer,
+            # misaligning targets against masks (the iteration-119 divergence of on7 on Nov 12).
+            print(f"replay: {n:,} rows in one add exceed the capacity {self.capacity:,}; keeping the newest", flush=True)
+            keep = slice(n - self.capacity, n)
+            obs, mask, pi, z, surprise, aux, opening, focus, vw = (t[keep] for t in (obs, mask, pi, z, surprise, aux, opening, focus, vw))
+            kind = kind[keep] if kind is not None else None
+            n = self.capacity
         idx = (torch.arange(n, device=self.obs.device) + self.next) % self.capacity
         self.obs[idx] = obs.to(self.obs.device, torch.float16)
         self.mask[idx] = mask.to(self.mask.device).bool()
@@ -136,6 +151,7 @@ class Replay:
         self.opening[idx] = opening.to(self.opening.device).bool()
         self.focus[idx] = focus.to(self.focus.device).bool()
         self.vw[idx] = vw.to(self.vw.device, torch.float16)
+        self.kind[idx] = kind.to(self.kind.device, torch.uint8) if kind is not None else 255
         self.next = (self.next + n) % self.capacity
         self.size = min(self.capacity, self.size + n)
         self.opening_idx = torch.nonzero(self.opening[:self.size]).squeeze(1)
@@ -162,13 +178,13 @@ class Replay:
             j = self.opening_idx[torch.randint(0, len(self.opening_idx), (o,), device=self.obs.device)]
             i = torch.cat([i, j])
         dev = self.train_device
-        obs, mask, pi, z, aux, vw = (self.obs[i].to(dev).float(), self.mask[i].to(dev), self.pi[i].to(dev).float(),
-                                     self.z[i].to(dev), self.aux[i].to(dev), self.vw[i].to(dev).float())
+        obs, mask, pi, z, aux, vw, kind = (self.obs[i].to(dev).float(), self.mask[i].to(dev), self.pi[i].to(dev).float(),
+                                           self.z[i].to(dev), self.aux[i].to(dev), self.vw[i].to(dev).float(), self.kind[i].to(dev))
         if sym is not None:
             k = torch.randint(0, sym[0].shape[0], (n,), device=obs.device)
             obs = obs.gather(1, sym[0][k])
             mask, pi = mask.gather(1, sym[1][k]), pi.gather(1, sym[1][k])
-        return obs, mask, pi, z, aux, vw
+        return obs, mask, pi, z, aux, vw, kind
 
 
 def evaluate(run_dir, model, iteration, args, board, omodel=None):
@@ -424,6 +440,25 @@ def main():
                          "KL from the network's prior is high (threshold steered to keep --p-full of decisions full)")
     ap.add_argument("--admit-kl", type=float, default=0.0,
                     help="also record fast-search decisions whose search-vs-prior KL exceeds this (0 = off)")
+    ap.add_argument("--opening-spot-head", action="store_true",
+                    help="give the opening network the shared per-spot settlement head (model.SpotHead): one small network "
+                         "scores every land node from its own entries, the trunk's context and its neighbours; zero-initialised")
+    ap.add_argument("--opening-spot-width", type=int, default=64, help="width of the spot head's per-node network")
+    ap.add_argument("--midgame-horizon-turns", type=int, default=0,
+                    help="mid-game value label: mean network value for the mover this many turns on along network-only playouts "
+                         "from each recorded position (0 = off); needs actors on an image that computes it")
+    ap.add_argument("--midgame-playouts", type=int, default=4, help="playouts per recorded position for the mid-game horizon label")
+    ap.add_argument("--midgame-horizon-weight", type=float, default=0.0,
+                    help="weight of the mid-game horizon label in the value target (the outcome's weight shrinks by it; the search value keeps --value-q-weight)")
+    ap.add_argument("--lr-warmup-steps", type=int, default=0,
+                    help="scale the main network's learning rate linearly from 0 over this many optimizer steps after launch "
+                         "(a fresh Adam takes full-size steps while its moments are empty; a changed target makes them all point one way)")
+    ap.add_argument("--midgame-horizon-ramp-games", type=int, default=0,
+                    help="ramp --midgame-horizon-weight linearly from 0 to its value over this many games (0 = full weight at once)")
+    ap.add_argument("--board-heads", action="store_true",
+                    help="give the main network the mid-game board heads (model.BoardHeads): shared per-node encoder, settlement/city "
+                         "scores per node, road scores per edge, robber scores per tile; zero-initialised")
+    ap.add_argument("--board-width", type=int, default=32, help="width of the board heads' node encoder")
     ap.add_argument("--spot-branch", action="store_true",
                     help="add the board-structure branch (model.SpotBranch) to the --init network, joined through zero "
                          "weights so it starts out computing exactly the --init network")
@@ -556,8 +591,17 @@ def main():
         spot_tables = None
     if args.value_fade and spot_tables is None:
         raise SystemExit("--value-fade needs the spot branch")
+    if args.resume:
+        bh_tables, bh_width = board_head_tables_of(ck["model"]), board_head_width_of(ck["model"])
+    elif args.board_heads:
+        bh_tables, bh_width = spots.board_head_tables(probe.observation_names(), args.map), args.board_width
+    else:
+        bh_tables, bh_width = None, args.board_width
     model = Policy(OBS, ACTIONS, hidden=args.hidden, aux=AUX if args.aux_weight > 0 or args.aux_extra_weight > 0 else 0, layers=args.layers,
-                   spots=spot_tables, extra_in=extra_in).to(device)
+                   spots=spot_tables, extra_in=extra_in, board_heads=bh_tables, board_width=bh_width).to(device)
+    if bh_tables is not None:
+        print(f"main network: board heads, {bh_tables['head_node_feat'].shape[1]} entries per node, {len(bh_tables['head_road_slot'])} edges, "
+              f"{len(bh_tables['head_robber_slot'])} tiles, width {bh_width}, {sum(p.numel() for p in model.board_heads.parameters()):,} parameters", flush=True)
     # The spot branch (new, starting from zero joins) and the extra input block get their own rates.
     branch = [p for n, p in model.named_parameters() if n.startswith("spots.")]
     extra = [p for n, p in model.named_parameters() if n.endswith("extra_weight")]
@@ -569,6 +613,7 @@ def main():
     if branch:
         groups.append({"params": branch, "lr": args.spot_lr}); group_lrs.append(args.spot_lr)
     opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=args.weight_decay)
+    warm_steps = 0  # optimizer steps taken this launch, for --lr-warmup-steps
     meta = {"iters": 0, "games": 0, "examples": 0, "obs_size": OBS, "action_size": ACTIONS,
             "aux": AUX if args.aux_weight > 0 or args.aux_extra_weight > 0 else 0, "hidden": args.hidden, "layers": args.layers,
             "spot_branch": spot_tables is not None, "extra_in": extra_in,
@@ -612,7 +657,7 @@ def main():
             state["aux.bias"] = torch.cat([state["aux.bias"], w.new_zeros(model.aux.out_features - old_n)])
             print(f"extended the auxiliary head {old_n} -> {model.aux.out_features} targets (new outputs zero)", flush=True)
         missing, unexpected = model.load_state_dict(state, strict=False)
-        new_head = {k for k in model.state_dict() if k.startswith(("aux.", "spots.")) or k == "flat_value_scale" or k.endswith("extra_weight")}
+        new_head = {k for k in model.state_dict() if k.startswith(("aux.", "spots.", "board_heads.")) or k == "flat_value_scale" or k.endswith("extra_weight")}
         if unexpected or set(missing) - new_head:
             raise SystemExit(f"--init checkpoint doesn't match the model: missing {missing}, unexpected {unexpected}")
         if any(k.startswith("aux.") for k in missing):
@@ -620,6 +665,8 @@ def main():
         if model.spots is not None:
             print(f"added the spot branch ({sum(p.numel() for p in branch):,} parameters, zero joins: same outputs "
                   f"to start){f'; trunk value fades out over {args.value_fade:,} games' if args.value_fade else ''}", flush=True)
+        if model.board_heads is not None and any(k.startswith("board_heads.") for k in missing):
+            print("added the board heads (zero outputs: same policy to start)", flush=True)
         meta["init"] = {"path": args.init, "meta": ck.get("meta")}
         print(f"starting {args.run} from {args.init}", flush=True)
         if args.revive_dead > 0:
@@ -644,7 +691,17 @@ def main():
         elif args.opening_init:
             oinit = torch.load(args.opening_init, map_location=device)
             ohidden, olayers = oinit["meta"].get("hidden", ohidden), oinit["meta"].get("layers", olayers)
-        omodel = Policy(OBS, ACTIONS, hidden=ohidden, layers=olayers, aux=0, spots=spot_tables, extra_in=extra_in).to(device)
+        if ock is not None:
+            head_tables, head_width = spot_head_tables_of(ock["model"]), spot_head_width_of(ock["model"])
+        elif args.opening_spot_head:
+            head_tables, head_width = spots.spot_head_tables(probe.observation_names(), args.map), args.opening_spot_width
+        else:
+            head_tables, head_width = None, args.opening_spot_width
+        omodel = Policy(OBS, ACTIONS, hidden=ohidden, layers=olayers, aux=0, spots=spot_tables, extra_in=extra_in,
+                        spot_head=head_tables, spot_width=head_width).to(device)
+        if head_tables is not None:
+            print(f"opening network: spot head, {head_tables['head_node_feat'].shape[1]} entries per node, width {head_width}, "
+                  f"{sum(p.numel() for p in omodel.spot_head.parameters()):,} parameters", flush=True)
         olr = args.opening_lr or args.lr
         oextra = [p for n, p in omodel.named_parameters() if n.endswith("extra_weight")]
         orest = [p for n, p in omodel.named_parameters() if not n.endswith("extra_weight")]
@@ -666,10 +723,15 @@ def main():
             if w.shape[1] < OBS - extra_in:
                 state["trunk.0.weight"] = torch.cat([w, w.new_zeros(w.shape[0], OBS - extra_in - w.shape[1])], 1)
                 print(f"opening network: widened inputs {w.shape[1]} -> {OBS - extra_in} (new weights zero)", flush=True)
-            omodel.load_state_dict(state)
+            if head_tables is not None and not any(k.startswith("spot_head.") for k in state):
+                # A new spot head on a trained network: its output starts at zero, so the policy is unchanged.
+                missing = omodel.load_state_dict(state, strict=False)
+                assert not missing.unexpected_keys and all(k.startswith("spot_head.") for k in missing.missing_keys), missing
+            else:
+                omodel.load_state_dict(state)
             ometa = {"steps": oinit["meta"].get("steps", 0), "examples": oinit["meta"].get("examples", 0), "obs_size": OBS,
                      "action_size": ACTIONS, "aux": 0, "hidden": ohidden, "layers": olayers, "spot_branch": spot_tables is not None,
-                     "extra_in": extra_in, "init": args.opening_init}
+                     "spot_head": head_tables is not None, "extra_in": extra_in, "init": args.opening_init}
             print(f"opening network from {args.opening_init} ({olayers}x{ohidden}, {ometa['steps']:,} steps so far), lr {olr:g}", flush=True)
         else:
             # A copy of the main network as it is now (a resumed run without one
@@ -679,9 +741,13 @@ def main():
                 if spot_tables is not None or extra_in:
                     raise SystemExit("the opening network can only be grown without the spot branch and --reach-lr-mult")
                 state = grow_state(state, omodel)
-            omodel.load_state_dict(state)
+            if head_tables is not None:
+                missing = omodel.load_state_dict(state, strict=False)
+                assert not missing.unexpected_keys and all(k.startswith("spot_head.") for k in missing.missing_keys), missing
+            else:
+                omodel.load_state_dict(state)
             ometa = {"steps": 0, "examples": 0, "obs_size": OBS, "action_size": ACTIONS, "aux": 0, "hidden": ohidden,
-                     "layers": olayers, "spot_branch": spot_tables is not None, "extra_in": extra_in}
+                     "layers": olayers, "spot_branch": spot_tables is not None, "spot_head": head_tables is not None, "extra_in": extra_in}
             print(f"opening network: {olayers}x{ohidden}, a copy of the main network, lr {olr:g}, "
                   f"trains from {args.opening_min_replay:,} placement decisions", flush=True)
 
@@ -722,7 +788,7 @@ def main():
         temp_moves=args.temp_moves, root_noise=args.root_noise, dirichlet_alpha=args.alpha, c_puct=args.c_puct,
         fpu_reduction=args.fpu, escalate_gap=args.escalate_gap, entropy_budget=args.entropy_budget, kl_escalate=args.kl_escalate, admit_kl=args.admit_kl, focus_sims=args.focus_sims, endgame_vp=args.endgame_vp,
         endgame_branches=args.endgame_branches, opening_branches=args.opening_branches,
-        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, fork_settlements_only=args.fork_settlements_only, placement_margin=args.placement_margin, placement_flatten=args.placement_flatten, placement_horizon_turns=args.placement_horizon_turns, placement_playouts=args.placement_playouts, placement_horizon_tau=args.placement_horizon_tau, placement_horizon_policy=args.placement_horizon_policy, placement_fork_weights=list(meta.get("fork_weights_init", [1.0, 1.0, 1.0, 1.0])), move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
+        placement_forks=args.placement_forks, placement_temp=args.placement_temp, placement_uniform=args.placement_uniform, fork_settlements_only=args.fork_settlements_only, placement_margin=args.placement_margin, placement_flatten=args.placement_flatten, placement_horizon_turns=args.placement_horizon_turns, placement_playouts=args.placement_playouts, placement_horizon_tau=args.placement_horizon_tau, placement_horizon_policy=args.placement_horizon_policy, midgame_horizon_turns=args.midgame_horizon_turns, midgame_playouts=args.midgame_playouts, placement_fork_weights=list(meta.get("fork_weights_init", [1.0, 1.0, 1.0, 1.0])), move_forks=args.move_forks, move_fork_temp=args.move_fork_temp, move_fork_uniform=args.move_fork_uniform, sibling_labels=args.sibling_labels, pool_board_share=args.hard_share, random_share=args.random_share, random_eps=args.random_eps, scarce_ows_share=args.scarce_ows_share, port_start_share=args.port_start_share, margin_weight=args.margin_weight,
         speed_weight=args.speed_weight, speed_turns=args.speed_turns, board=board, **rules_from_args(args))
     # Random-opponent games stop for good once search beats the random bot in
     # every evaluation game with none capped (recorded in meta, so a resumed
@@ -807,12 +873,21 @@ def main():
             "opening": np.frombuffer(d["opening"], np.uint8).astype(bool),
             "focus": np.frombuffer(d["focus"], np.uint8).astype(bool),
             "game": np.frombuffer(d["game"], "<u4"),
+            "kind": np.frombuffer(d["kind"], np.uint8) if "kind" in d else np.full(n_local, 255, np.uint8),
+            "horizon": np.frombuffer(d["horizon"], "<f4") if "horizon" in d else np.full(n_local, np.nan, np.float32),
         }]
+        kind_names = list(d.get("kind_names") or KIND_NAMES)
         remote_games, remote_lag, remote_dropped, teacher_shards = 0, [], 0, 0
         shard_stats = {"decisions": 0, "escalated": 0, "branches": 0, "forks": 0, "pool_games": 0, "luck_abs": 0.0, "luck_events": 0, "results": [0, 0, 0], "endgame": 0, "n": 0}
         if remote is not None:
             got, remote_dropped = remote.collect(meta["iters"])
             for header, arrays in got:
+                if header["model_iter"] > meta["iters"]:
+                    # A shard played by a later iteration than this learner has reached can only come from a previous
+                    # launch of the run (e.g. a diverged learner's last publish): never learn from it.
+                    print(f"dropping a shard from model iteration {header['model_iter']} (this launch is at {meta['iters']})", flush=True)
+                    remote_dropped += 1
+                    continue
                 batches.append({**arrays, "opening": arrays["opening"].astype(bool), "focus": arrays["focus"].astype(bool)})
                 remote_games += header["games"]
                 remote_lag.append(meta["iters"] - header["model_iter"])
@@ -850,6 +925,13 @@ def main():
         # values beyond a win can't tell winning moves apart).
         bound = 1.0 + args.margin_weight + args.speed_weight
         value_target = np.clip((1 - args.value_q_weight) * z_target + args.value_q_weight * batch["q"], -bound, bound)
+        horizon_n = 0
+        if args.midgame_horizon_weight > 0:
+            # Rows with a horizon label: the outcome gives up that weight to the label (the search value keeps its share).
+            h = batch["horizon"]; has_h = np.isfinite(h); horizon_n = int(has_h.sum())
+            wh = args.midgame_horizon_weight * (min(1.0, meta["games"] / args.midgame_horizon_ramp_games) if args.midgame_horizon_ramp_games > 0 else 1.0)
+            with_h = np.clip((1 - args.value_q_weight - wh) * z_target + args.value_q_weight * batch["q"] + wh * np.nan_to_num(h), -bound, bound)
+            value_target = np.where(has_h, with_h, value_target)
         if args.value_positions > 0:
             _, inv, counts = np.unique(batch["game"], return_inverse=True, return_counts=True)
             vw = np.minimum(1.0, args.value_positions / counts[inv]).astype(np.float32)
@@ -858,7 +940,7 @@ def main():
         replay.add(torch.from_numpy(batch["obs"]), torch.from_numpy(batch["mask"]), torch.from_numpy(batch["pi"]),
                    torch.from_numpy(value_target.astype(np.float32)),
                    torch.from_numpy(batch["surprise"]), torch.from_numpy(batch["aux"]),
-                   torch.from_numpy(batch["opening"]), torch.from_numpy(batch["focus"]), torch.from_numpy(vw))
+                   torch.from_numpy(batch["opening"]), torch.from_numpy(batch["focus"]), torch.from_numpy(vw), torch.from_numpy(batch["kind"]))
         n_open = int(batch["opening"].sum())
         if oreplay is not None and n_open:
             # The placement decisions, each counting fully (the sibling labels already average their continuations).
@@ -870,7 +952,7 @@ def main():
             o_value_target = np.clip((1 - ow) * z_target + ow * batch["q"], -bound, bound)
             oreplay.add(sel(batch["obs"]), sel(batch["mask"]), sel(batch["pi"]), sel(o_value_target.astype(np.float32)),
                         sel(batch["surprise"]), sel(batch["aux"]), sel(batch["opening"]), sel(batch["focus"]),
-                        torch.ones(n_open))
+                        torch.ones(n_open), sel(batch["kind"]))
         endgame_share = (float(np.frombuffer(d["endgame"], np.uint8).sum()) + shard_stats["endgame"]) / max(1, n_local + shard_stats["n"])
         luck = (d["luck_abs"] + shard_stats["luck_abs"]) / max(1, d["luck_events"] + shard_stats["luck_events"])
         games_seen = args.games + remote_games
@@ -889,6 +971,14 @@ def main():
                     surprise_dist[name] = {"n": int(len(x)), "mean": float(x.mean()), "p50": float(q[0]), "p90": float(q[1]), "p99": float(q[2]),
                                            "gt05": float((x > 0.05).mean()), "gt20": float((x > 0.2).mean()), "gt69": float((x > 0.69).mean()),
                                            "mean_gt05": float(x[x > 0.05].mean()) if (x > 0.05).any() else 0.0}
+        # Search surprise per kind of action played, mid-game rows (where the prior is still being taught).
+        surprise_kind = {}
+        if n:
+            mid_kind, mid_s = batch["kind"][~is_open], batch["surprise"][~is_open]
+            for k in np.unique(mid_kind):
+                if k < len(kind_names):
+                    x = mid_s[mid_kind == k]
+                    surprise_kind[kind_names[k]] = {"n": int(len(x)), "mean": float(x.mean()), "gt20": float((x > 0.2).mean())}
         t_play = time.time() - t0
 
         # ---- Learn toward the search's visit counts and the results.
@@ -897,16 +987,27 @@ def main():
         if args.max_steps > 0:
             steps = min(steps, args.max_steps)
         stats = [torch.zeros(6, device=device)] if steps == 0 else []
+        kind_ce = torch.zeros(len(kind_names) + 1, device=device, dtype=torch.float64)  # per-kind policy loss sums (last = unknown)
+        kind_n = torch.zeros(len(kind_names) + 1, device=device, dtype=torch.float64)
         model.train()
         for _ in range(steps):
-            obs, mask, pi, z, aux, vw = replay.sample(args.batch, sym, args.surprise_share, args.opening_share, args.focus_share)
+            if args.lr_warmup_steps > 0 and warm_steps <= args.lr_warmup_steps:
+                scale = min(1.0, (warm_steps + 1) / args.lr_warmup_steps)
+                for g, base in zip(opt.param_groups, group_lrs):
+                    g["lr"] = base * scale
+                warm_steps += 1
+            obs, mask, pi, z, aux, vw, kind = replay.sample(args.batch, sym, args.surprise_share, args.opening_share, args.focus_share)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.bf16):
                 if model.aux is not None:
                     logits, value, aux_pred = model.forward_aux(obs, mask)
                 else:
                     logits, value = model(obs, mask)
             logp = torch.log_softmax(logits, -1)
-            loss_pi = -(pi * logp).sum(-1).mean()
+            ce = -(pi * logp).sum(-1)
+            loss_pi = ce.mean()
+            kk = kind.long().clamp(max=len(kind_names))
+            kind_ce += torch.bincount(kk, weights=ce.detach().double(), minlength=len(kind_names) + 1)
+            kind_n += torch.bincount(kk, minlength=len(kind_names) + 1).double()
             loss_v = ((value - z) ** 2 * vw).sum() / vw.sum().clamp(min=1.0)
             if model.aux is not None:
                 err = (aux_pred - aux) ** 2
@@ -923,6 +1024,7 @@ def main():
                                       -(logp.exp() * logp.clamp(min=-1e4)).sum(-1).mean().detach(),
                                       -(pi * pi.clamp(min=1e-12).log()).sum(-1).mean()]))
         loss_pi, loss_v, loss_aux, loss_aux2, ent, target_ent = torch.stack(stats).mean(0).tolist()
+        loss_pi_kind = {kind_names[k]: float(kind_ce[k] / kind_n[k]) for k in range(len(kind_names)) if kind_n[k] > 0}
 
         # ---- The opening network learns from the placement decisions alone.
         osteps, oloss_pi, oloss_v = 0, 0.0, 0.0
@@ -933,7 +1035,7 @@ def main():
             ostats = []
             omodel.train()
             for _ in range(osteps):
-                obs, mask, pi, z, _, vw = oreplay.sample(args.opening_batch, sym)
+                obs, mask, pi, z, _, vw, _ = oreplay.sample(args.opening_batch, sym)
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.bf16):
                     logits, value = omodel(obs, mask)
                 logp = torch.log_softmax(logits, -1)
@@ -966,7 +1068,9 @@ def main():
                  "decisions_per_game": (d["decisions"] + shard_stats["decisions"]) / max(1, games_seen),
                  "escalated": d["escalated"] + shard_stats["escalated"], "branches": d["branches"] + shard_stats["branches"], "forks": d["forks"] + shard_stats["forks"],
                  "pool_games": d["pool_games"] + shard_stats["pool_games"], "pool_size": len(pool), "random_games": d["random_games"], "endgame_share": endgame_share,
-                 "surprise": mean_surprise, "surprise_dist": surprise_dist, "luck_per_event": luck, "luck_c": luck_c,
+                 "surprise": mean_surprise, "surprise_dist": surprise_dist, "surprise_kind": surprise_kind, "loss_pi_kind": loss_pi_kind,
+                 "horizon_rows": horizon_n, "lr_scale": (min(1.0, warm_steps / args.lr_warmup_steps) if args.lr_warmup_steps > 0 else 1.0),
+                 "luck_per_event": luck, "luck_c": luck_c,
                  "loss_pi": loss_pi, "loss_v": loss_v, "loss_aux": loss_aux, "loss_aux2": loss_aux2, "entropy": ent, "target_entropy": target_ent,
                  "fork_pairs": {k: {"n": c[0], "gap": c[1] / c[0], "alt_p": c[2] / c[0], "regret": c[3] / c[0]} for k, c in fork_acc.items() if c[0]},
                  "fork_weights": self_play_kwargs.get("placement_fork_weights"),

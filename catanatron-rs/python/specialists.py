@@ -41,8 +41,16 @@ def order(boards):
     return out
 
 
+def net_key(path):
+    """NN key for a network file: "main@opening" pairs are kept; a snapshot with an osnap_*.ctnn beside it plays with it."""
+    if "@" in path:
+        return "NN:" + "@".join(os.path.abspath(p) for p in path.split("@"))
+    opath = os.path.join(os.path.dirname(path), "o" + os.path.basename(path))
+    return "NN:" + os.path.abspath(path) + (f"@{os.path.abspath(opath)}" if os.path.exists(opath) else "")
+
+
 def evaluate(snap, base_net, board, games, threads):
-    (w, l), capped = catanatron_rs.play_bots(["NN:" + os.path.abspath(snap), "NN:" + os.path.abspath(base_net)],
+    (w, l), capped = catanatron_rs.play_bots([net_key(snap), net_key(base_net)],
                                              games, 4242, threads, map_type="BASE", board=board, **OPENHEX_1V1)
     return w / games, capped / games
 
@@ -51,7 +59,7 @@ def run_one(b, args, az_args, results_path):
     run = f"{args.prefix}-{b['seed']}"
     board = f"seed:{b['seed']}"
     log_path = os.path.join("runs", run + ".out")
-    cmd = [sys.executable, "-u", "az.py", "--run", run, "--init", args.base_pt, "--fixed-board", board,
+    cmd = [sys.executable, "-u", args.az, "--run", run, "--init", args.base_pt, "--fixed-board", board,
            "--eval-every", str(args.eval_every), "--eval-games", "0", "--eval-search-games", "0",
            "--eval-random-games", "0"] + az_args
     # A board that was interrupted before has an unfinished run directory
@@ -122,6 +130,7 @@ def main():
     ap.add_argument("--eval-every", type=int, default=5)
     ap.add_argument("--eval-games", type=int, default=1000)
     ap.add_argument("--threads", type=int, default=12, help="threads for the evaluations")
+    ap.add_argument("--az", default="az.py", help="the learner script to run (e.g. the opening-net branch's az.py)")
     args = ap.parse_args(sys.argv[1:split])
     az_args = sys.argv[split + 1:]
     for flag in ("--run", "--init", "--resume", "--fixed-board", "--eval-every"):

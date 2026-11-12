@@ -315,7 +315,7 @@ fn observation_hides_opponent_dev_card_types() {
             + 54 * catanatron::encoding::REACH_PER_NODE + 4 * catanatron::encoding::REACH_PER_PLAYER + 1
             + catanatron::encoding::STRUCT_BOARD + 54 * catanatron::encoding::STRUCT_PER_NODE + 3
             + 54 * catanatron::encoding::RELATION_PER_NODE + 74
-            + 4 * catanatron::encoding::AWARD_PER_PLAYER + 2);
+            + 4 * catanatron::encoding::AWARD_PER_PLAYER + 54 * catanatron::encoding::AWARD_PER_NODE + 107);
         let mut p = bots(2, seed);
         while !g.is_over() {
             let me = g.state.current_color();
