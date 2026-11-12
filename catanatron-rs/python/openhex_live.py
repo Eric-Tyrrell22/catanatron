@@ -30,7 +30,7 @@ from openhex_bot import MirrorBot, OutOfStep
 API = "https://open-hex.web.app"
 KEYS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openhex_keys.json")
 UA = {"User-Agent": "catan-research-client"}
-PAUSE_BETWEEN_GAMES_S = 60
+PAUSE_BETWEEN_GAMES_S = 3  # seconds between a finished game and the next queue join (was 60)
 
 
 def log(name, msg):

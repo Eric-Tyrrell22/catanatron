@@ -185,6 +185,28 @@ fn sparse_observation_matches_dense() {
     });
 }
 
+/// The cached sparse encoder (`EncodeCache`: road distances found again
+/// for boards seen before) gives exactly the plain encoder's entries, for
+/// every observer, position after position with one cache across games of
+/// different sizes and maps, with every block on.
+#[test]
+fn cached_sparse_encoding_matches_plain() {
+    use catanatron::encoding::EncodeCache;
+    let mut cache = EncodeCache::default();
+    let (mut plain, mut cached) = (Vec::new(), Vec::new());
+    let mut checked = 0;
+    for_each_decision(12, |g| {
+        let space = ObservationSpace::with_features(&g.state.board.map, ObsFeatures::ALL);
+        for &me in &g.state.colors {
+            let n = space.encode_sparse_into(&g.state, me, &mut plain);
+            let m = space.encode_sparse_cached(&g.state, me, &mut cached, &mut cache);
+            assert_eq!(&plain[..n], &cached[..m]);
+            checked += 1;
+        }
+    });
+    assert!(checked > 1000);
+}
+
 #[test]
 fn dice_features_track_the_balanced_deck() {
     use catanatron::encoding::DICE_FEATURES;

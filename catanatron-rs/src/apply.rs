@@ -3,7 +3,7 @@
 
 use crate::board::BuildingType;
 use crate::fixed::FixedVec;
-use crate::state::State;
+use crate::state::{PerSeat, State};
 use crate::types::*;
 
 /// Applies `action`. If `replay` is given, its result is used instead of
@@ -360,8 +360,8 @@ fn roll(s: &mut State, color: Color, replay: Option<ActionResult>) -> ActionResu
 
 /// Seat-indexed payout for a roll. A resource the bank can't fully pay
 /// out is paid to no one.
-pub fn yield_resources(s: &State, number: u8) -> Vec<Freqdeck> {
-    let mut payout = vec![[0u32; 5]; s.players.len()];
+pub fn yield_resources(s: &State, number: u8) -> PerSeat<Freqdeck> {
+    let mut payout: PerSeat<Freqdeck> = FixedVec::filled([0u32; 5], s.players.len());
     let mut totals = [0u32; 5];
     let map = &s.board.map;
     for &ti in &map.tiles_by_number[number as usize] {

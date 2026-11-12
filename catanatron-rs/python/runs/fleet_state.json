@@ -1,0 +1,1411 @@
+{
+ "pools": {
+  "c8a.24xlarge@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794507319.808764,
+   "last_fail": 1794506119.8087626
+  },
+  "m8a.metal-48xl@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794507295.3656423,
+   "last_fail": 1794506095.3656404
+  },
+  "m8a.metal-48xl@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794507307.8722868,
+   "last_fail": 1794506107.8722851
+  },
+  "c8a.metal-48xl@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794507357.2563486,
+   "last_fail": 1794506157.2563474
+  },
+  "c8a.16xlarge@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794512212.4593136,
+   "last_success": 1794474671.3023279,
+   "last_fail": 1794511012.4593124
+  },
+  "c8a.24xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794507347.4785326,
+   "last_fail": 1794506147.4785306
+  },
+  "m8a.16xlarge@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794512224.6909413,
+   "last_fail": 1794511024.6909397
+  },
+  "c8a.16xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794512233.1379662,
+   "last_success": 1794475308.6851494,
+   "last_fail": 1794511033.1379645
+  },
+  "c8a.16xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794510754.774024,
+   "last_fail": 1794509554.774022,
+   "last_success": 1794511058.6122704
+  },
+  "m8a.metal-48xl@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794507559.1971858,
+   "last_fail": 1794506359.1971843
+  },
+  "c8a.metal-48xl@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794507569.1261866,
+   "last_fail": 1794506369.1261847
+  },
+  "c8a.48xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794507448.3920772,
+   "last_fail": 1794506248.3920755,
+   "last_success": 1794426800.593291
+  },
+  "m8a.metal-48xl@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794507428.0432796,
+   "last_fail": 1794506228.043278
+  },
+  "m8a.metal-48xl@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794507487.021298,
+   "last_fail": 1794506287.021297
+  },
+  "m8a.16xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794512257.0266345,
+   "last_fail": 1794511057.0266328
+  },
+  "m8a.16xlarge@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794510885.0234482,
+   "last_fail": 1794509685.0234463
+  },
+  "m8a.16xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794512245.9096413,
+   "last_fail": 1794511045.9096398,
+   "last_success": 1794488216.890979
+  },
+  "c8a.24xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794507440.0990405,
+   "last_fail": 1794506240.0990384
+  },
+  "c7a.16xlarge@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794510920.781768,
+   "last_success": 1794505780.659983,
+   "last_fail": 1794509720.7817657
+  },
+  "c7a.16xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794510894.637616,
+   "last_fail": 1794509694.6376145,
+   "last_success": 1794469046.2339885
+  },
+  "c8a.16xlarge@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794510947.7206783,
+   "last_success": 1794443000.2513278,
+   "last_fail": 1794509747.7206767
+  },
+  "c8a.48xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794507765.004849,
+   "last_fail": 1794506565.004847
+  },
+  "m8a.48xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794507597.1462135,
+   "last_fail": 1794506397.1462116
+  },
+  "c8a.48xlarge@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794507607.22793,
+   "last_fail": 1794506407.2279289
+  },
+  "m8a.48xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794507855.827287,
+   "last_success": 1794402739.576837,
+   "last_fail": 1794506655.8272836
+  },
+  "m8a.48xlarge@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794507710.5760121,
+   "last_fail": 1794506510.576011
+  },
+  "c8a.48xlarge@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794507738.060501,
+   "last_fail": 1794506538.0604997
+  },
+  "m8a.16xlarge@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794510908.4848855,
+   "last_fail": 1794509708.4848835
+  },
+  "m7a.16xlarge@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794510936.72285,
+   "last_fail": 1794509736.7228484
+  },
+  "c8a.24xlarge@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794507619.1610453,
+   "last_fail": 1794506419.161043
+  },
+  "c7a.16xlarge@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794511020.4096057,
+   "last_fail": 1794509820.4096034
+  },
+  "c7a.16xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794511458.6421483,
+   "last_success": 1794509822.1231518,
+   "last_fail": 1794510258.6421459
+  },
+  "c8g.24xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794405598.1572351,
+   "last_fail": 1794404398.1572325
+  },
+  "m8g.24xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794405618.0245411,
+   "last_fail": 1794404418.0245397
+  },
+  "m8g.24xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794405630.6016335,
+   "last_fail": 1794404430.6016324
+  },
+  "c8g.16xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 0,
+   "last_success": 1794408175.5092962
+  },
+  "m7a.16xlarge@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794511497.5489438,
+   "last_fail": 1794510297.5489423
+  },
+  "m7a.16xlarge@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794511728.8527746,
+   "last_fail": 1794510528.852773
+  },
+  "m7a.16xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794511653.6247575,
+   "last_fail": 1794510453.6247563
+  },
+  "m7a.16xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794511511.4846725,
+   "last_fail": 1794510311.4846706
+  },
+  "c7a.16xlarge@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794511755.9259548,
+   "last_fail": 1794510555.925953
+  },
+  "c8a.16xlarge@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794511527.8127365,
+   "last_success": 1794446452.2342408,
+   "last_fail": 1794510327.8127341
+  },
+  "r8a.24xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794507333.4064586,
+   "last_fail": 1794506133.4064574
+  },
+  "r8a.24xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794507585.5089915,
+   "last_fail": 1794506385.5089898
+  },
+  "r8a.24xlarge@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794507752.0816185,
+   "last_fail": 1794506552.0816169
+  },
+  "m7i.16xlarge@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794511473.9020808,
+   "last_fail": 1794510273.9020796
+  },
+  "c8a.metal-48xl@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794507839.6201572,
+   "last_fail": 1794506639.6201553
+  },
+  "r7a.16xlarge@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794511484.5636826,
+   "last_fail": 1794510284.5636811
+  },
+  "c8a.metal-48xl@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794507972.0445561,
+   "last_fail": 1794506772.0445547
+  },
+  "m7i.16xlarge@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794511599.8656259,
+   "last_fail": 1794510399.8656247
+  },
+  "m7i.16xlarge@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794511608.9049613,
+   "last_fail": 1794510408.9049592
+  },
+  "r7a.16xlarge@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794511618.2749376,
+   "last_fail": 1794510418.2749355
+  },
+  "m7i.16xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794511626.4425719,
+   "last_fail": 1794510426.4425704
+  },
+  "m8a.48xlarge@us-east-1a": {
+   "fails": 0,
+   "cool_until": 1794508311.630098,
+   "last_fail": 1794507111.630097
+  },
+  "m7i.16xlarge@us-east-1d": {
+   "fails": 0,
+   "cool_until": 1794511636.7473671,
+   "last_fail": 1794510436.7473657
+  },
+  "c8a.24xlarge@us-east-1c": {
+   "fails": 0,
+   "cool_until": 1794508407.573001,
+   "last_fail": 1794507207.5729997
+  },
+  "m8a.24xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 0,
+   "last_success": 1794507289.852683
+  },
+  "r7a.16xlarge@us-east-1b": {
+   "fails": 0,
+   "cool_until": 1794511741.7687955,
+   "last_fail": 1794510541.7687943
+  },
+  "c7i.16xlarge@us-east-1f": {
+   "fails": 0,
+   "cool_until": 1794511774.1714194,
+   "last_fail": 1794510574.1714177
+  }
+ },
+ "launched": {
+  "i-07a3009833282a130": {
+   "pool": "m8a.24xlarge@us-east-1b",
+   "at": 1794507227.4637127,
+   "usd_per_100k": 3.2777142857142856
+  },
+  "i-00516dd44ec7a14c0": {
+   "pool": "m8a.24xlarge@us-east-1b",
+   "at": 1794507289.8526845,
+   "usd_per_100k": 3.2777142857142856
+  },
+  "i-0a7e72a9bb6481eea": {
+   "pool": "c8a.16xlarge@us-east-1b",
+   "at": 1794511058.6122715,
+   "usd_per_100k": 2.0092
+  }
+ },
+ "overpriced": {
+  "i-0ad6985684381375d": 1794379233.393405,
+  "i-0a4e1689b4af50399": 1794379901.2437315,
+  "i-028e6a8ebe56ce39e": 1794384444.0737224,
+  "i-054aa8eb85606b037": 1794464008.664643
+ },
+ "idle": {
+  "i-036d488949c3abe92": 1794437926.1591573,
+  "i-0c8a580ffed982c44": 1794437926.1591582
+ },
+ "last_migration": 1794493083.825411,
+ "prices": {
+  "at": 1794523259.609972,
+  "pools": [
+   {
+    "type": "m8g.24xlarge",
+    "az": "us-east-1a",
+    "price": 1.1991,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 5.450454545454545
+   },
+   {
+    "type": "m8a.48xlarge",
+    "az": "us-east-1f",
+    "price": 4.8225,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 4.121794871794872
+   },
+   {
+    "type": "m8a.24xlarge",
+    "az": "us-east-1f",
+    "price": 4.0437,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 5.776714285714286
+   },
+   {
+    "type": "m8a.24xlarge",
+    "az": "us-east-1b",
+    "price": 2.2542,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 3.220285714285714
+   },
+   {
+    "type": "m8a.16xlarge",
+    "az": "us-east-1c",
+    "price": 1.0859,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 2.1718
+   },
+   {
+    "type": "m7i.16xlarge",
+    "az": "us-east-1f",
+    "price": 0.8576,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 2.8586666666666667
+   },
+   {
+    "type": "m7i.16xlarge",
+    "az": "us-east-1a",
+    "price": 0.8883,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 2.961
+   },
+   {
+    "type": "m7g.16xlarge",
+    "az": "us-east-1a",
+    "price": 0.9973,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 8.310833333333333
+   },
+   {
+    "type": "m7g.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.911,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 7.591666666666667
+   },
+   {
+    "type": "m7a.16xlarge",
+    "az": "us-east-1c",
+    "price": 0.9786,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 2.796
+   },
+   {
+    "type": "m7a.16xlarge",
+    "az": "us-east-1f",
+    "price": 0.7817,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 2.233428571428571
+   },
+   {
+    "type": "c8g.24xlarge",
+    "az": "us-east-1d",
+    "price": 0.917,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 4.168181818181818
+   },
+   {
+    "type": "c8a.metal-48xl",
+    "az": "us-east-1f",
+    "price": 3.3333,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.848974358974359
+   },
+   {
+    "type": "c8a.metal-48xl",
+    "az": "us-east-1b",
+    "price": 3.0538,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.61008547008547
+   },
+   {
+    "type": "c8a.metal-48xl",
+    "az": "us-east-1d",
+    "price": 2.7357,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.338205128205128
+   },
+   {
+    "type": "c8a.24xlarge",
+    "az": "us-east-1b",
+    "price": 1.4882,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 2.126
+   },
+   {
+    "type": "c8a.16xlarge",
+    "az": "us-east-1b",
+    "price": 1.0156,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 2.0312
+   },
+   {
+    "type": "c7g.16xlarge",
+    "az": "us-east-1a",
+    "price": 0.8463,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 7.052500000000001
+   },
+   {
+    "type": "c7a.16xlarge",
+    "az": "us-east-1f",
+    "price": 1.1711,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 3.346
+   },
+   {
+    "type": "r8a.24xlarge",
+    "az": "us-east-1c",
+    "price": 2.6022,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 3.7174285714285715
+   },
+   {
+    "type": "r8a.24xlarge",
+    "az": "us-east-1f",
+    "price": 3.029,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 4.3271428571428565
+   },
+   {
+    "type": "r7i.16xlarge",
+    "az": "us-east-1b",
+    "price": 2.312,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 7.706666666666666
+   },
+   {
+    "type": "r7i.16xlarge",
+    "az": "us-east-1a",
+    "price": 2.0421,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 6.807
+   },
+   {
+    "type": "r7a.16xlarge",
+    "az": "us-east-1f",
+    "price": 1.3471,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 3.8488571428571428
+   },
+   {
+    "type": "r7a.16xlarge",
+    "az": "us-east-1a",
+    "price": 0.9742,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 2.7834285714285714
+   },
+   {
+    "type": "m8g.24xlarge",
+    "az": "us-east-1f",
+    "price": 1.8275,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 8.306818181818182
+   },
+   {
+    "type": "m8g.24xlarge",
+    "az": "us-east-1b",
+    "price": 0.918,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 4.172727272727273
+   },
+   {
+    "type": "m8a.metal-48xl",
+    "az": "us-east-1b",
+    "price": 2.6251,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.2436752136752136
+   },
+   {
+    "type": "m7g.16xlarge",
+    "az": "us-east-1b",
+    "price": 0.8462,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 7.051666666666667
+   },
+   {
+    "type": "c8g.24xlarge",
+    "az": "us-east-1a",
+    "price": 1.8957,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 8.616818181818182
+   },
+   {
+    "type": "c8g.16xlarge",
+    "az": "us-east-1c",
+    "price": 0.7994,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 5.3293333333333335
+   },
+   {
+    "type": "c8g.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.7087,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 4.724666666666667
+   },
+   {
+    "type": "c8a.metal-48xl",
+    "az": "us-east-1c",
+    "price": 4.2814,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 3.659316239316239
+   },
+   {
+    "type": "c8a.24xlarge",
+    "az": "us-east-1f",
+    "price": 1.047,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 1.4957142857142856
+   },
+   {
+    "type": "c7i.16xlarge",
+    "az": "us-east-1c",
+    "price": 1.5689,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 5.229666666666667
+   },
+   {
+    "type": "c7g.16xlarge",
+    "az": "us-east-1c",
+    "price": 0.7307,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 6.089166666666666
+   },
+   {
+    "type": "c7g.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.578,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 4.816666666666666
+   },
+   {
+    "type": "c7a.16xlarge",
+    "az": "us-east-1b",
+    "price": 0.7219,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 2.0625714285714287
+   },
+   {
+    "type": "m8g.24xlarge",
+    "az": "us-east-1c",
+    "price": 1.0692,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 4.859999999999999
+   },
+   {
+    "type": "m8g.16xlarge",
+    "az": "us-east-1f",
+    "price": 1.1448,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 7.632
+   },
+   {
+    "type": "m8a.metal-48xl",
+    "az": "us-east-1d",
+    "price": 1.1685,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 0.9987179487179487
+   },
+   {
+    "type": "m8a.48xlarge",
+    "az": "us-east-1a",
+    "price": 3.5878,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 3.066495726495727
+   },
+   {
+    "type": "m8a.48xlarge",
+    "az": "us-east-1d",
+    "price": 2.7441,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.3453846153846154
+   },
+   {
+    "type": "m8a.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.9881,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.9761999999999997
+   },
+   {
+    "type": "m7g.16xlarge",
+    "az": "us-east-1c",
+    "price": 0.8259,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 6.882499999999999
+   },
+   {
+    "type": "m7a.16xlarge",
+    "az": "us-east-1a",
+    "price": 1.1114,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 3.1754285714285713
+   },
+   {
+    "type": "c8g.24xlarge",
+    "az": "us-east-1c",
+    "price": 1.0771,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 4.8959090909090905
+   },
+   {
+    "type": "c8g.24xlarge",
+    "az": "us-east-1f",
+    "price": 1.209,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 5.495454545454546
+   },
+   {
+    "type": "c8g.16xlarge",
+    "az": "us-east-1b",
+    "price": 0.7573,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 5.048666666666667
+   },
+   {
+    "type": "c8g.16xlarge",
+    "az": "us-east-1a",
+    "price": 0.8886,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 5.9239999999999995
+   },
+   {
+    "type": "c8a.48xlarge",
+    "az": "us-east-1c",
+    "price": 2.8175,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.408119658119658
+   },
+   {
+    "type": "c8a.48xlarge",
+    "az": "us-east-1f",
+    "price": 2.9674,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.536239316239316
+   },
+   {
+    "type": "c8a.48xlarge",
+    "az": "us-east-1a",
+    "price": 3.8003,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 3.2481196581196583
+   },
+   {
+    "type": "c7a.16xlarge",
+    "az": "us-east-1c",
+    "price": 0.8697,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 2.484857142857143
+   },
+   {
+    "type": "c7a.16xlarge",
+    "az": "us-east-1a",
+    "price": 0.7661,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 2.1888571428571426
+   },
+   {
+    "type": "r8a.24xlarge",
+    "az": "us-east-1b",
+    "price": 1.6056,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 2.2937142857142856
+   },
+   {
+    "type": "r8a.24xlarge",
+    "az": "us-east-1d",
+    "price": 1.1014,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 1.5734285714285712
+   },
+   {
+    "type": "r8a.16xlarge",
+    "az": "us-east-1f",
+    "price": 3.2566,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 6.5132
+   },
+   {
+    "type": "r7i.16xlarge",
+    "az": "us-east-1f",
+    "price": 1.3064,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 4.354666666666667
+   },
+   {
+    "type": "r7i.16xlarge",
+    "az": "us-east-1d",
+    "price": 1.5944,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 5.314666666666667
+   },
+   {
+    "type": "r7a.16xlarge",
+    "az": "us-east-1b",
+    "price": 1.1622,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 3.320571428571428
+   },
+   {
+    "type": "m8g.16xlarge",
+    "az": "us-east-1b",
+    "price": 0.81,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 5.4
+   },
+   {
+    "type": "m8g.16xlarge",
+    "az": "us-east-1a",
+    "price": 1.0069,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 6.712666666666666
+   },
+   {
+    "type": "m8a.metal-48xl",
+    "az": "us-east-1f",
+    "price": 1.5438,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 1.3194871794871794
+   },
+   {
+    "type": "m8a.24xlarge",
+    "az": "us-east-1c",
+    "price": 2.7511,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 3.930142857142857
+   },
+   {
+    "type": "m8a.24xlarge",
+    "az": "us-east-1d",
+    "price": 2.4436,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 3.490857142857143
+   },
+   {
+    "type": "m8a.16xlarge",
+    "az": "us-east-1f",
+    "price": 1.0068,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 2.0136
+   },
+   {
+    "type": "c8g.24xlarge",
+    "az": "us-east-1b",
+    "price": 1.1786,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 5.357272727272728
+   },
+   {
+    "type": "c8a.24xlarge",
+    "az": "us-east-1c",
+    "price": 2.191,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 3.1299999999999994
+   },
+   {
+    "type": "c8a.24xlarge",
+    "az": "us-east-1a",
+    "price": 1.7035,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 2.4335714285714287
+   },
+   {
+    "type": "c7i.16xlarge",
+    "az": "us-east-1f",
+    "price": 1.0463,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 3.4876666666666662
+   },
+   {
+    "type": "c7g.16xlarge",
+    "az": "us-east-1b",
+    "price": 0.6794,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 5.661666666666667
+   },
+   {
+    "type": "r8a.16xlarge",
+    "az": "us-east-1c",
+    "price": 3.2103,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 6.4206
+   },
+   {
+    "type": "r8a.16xlarge",
+    "az": "us-east-1a",
+    "price": 3.0594,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 6.118799999999999
+   },
+   {
+    "type": "r8a.16xlarge",
+    "az": "us-east-1d",
+    "price": 2.9413,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 5.8826
+   },
+   {
+    "type": "m8g.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.8041,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 5.360666666666667
+   },
+   {
+    "type": "m8a.metal-48xl",
+    "az": "us-east-1a",
+    "price": 2.6672,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.2796581196581194
+   },
+   {
+    "type": "c8a.metal-48xl",
+    "az": "us-east-1a",
+    "price": 2.2272,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 1.9035897435897435
+   },
+   {
+    "type": "c8a.48xlarge",
+    "az": "us-east-1b",
+    "price": 2.5366,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.168034188034188
+   },
+   {
+    "type": "c8a.48xlarge",
+    "az": "us-east-1d",
+    "price": 3.0018,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.5656410256410256
+   },
+   {
+    "type": "c8a.16xlarge",
+    "az": "us-east-1c",
+    "price": 1.4749,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 2.9498
+   },
+   {
+    "type": "r8a.24xlarge",
+    "az": "us-east-1a",
+    "price": 1.7885,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 2.555
+   },
+   {
+    "type": "r8a.16xlarge",
+    "az": "us-east-1b",
+    "price": 2.3346,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 4.6692
+   },
+   {
+    "type": "m8g.16xlarge",
+    "az": "us-east-1c",
+    "price": 0.9063,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 6.042
+   },
+   {
+    "type": "m8a.24xlarge",
+    "az": "us-east-1a",
+    "price": 2.7105,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 3.8721428571428573
+   },
+   {
+    "type": "m7i.16xlarge",
+    "az": "us-east-1c",
+    "price": 0.9041,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 3.0136666666666665
+   },
+   {
+    "type": "m7g.16xlarge",
+    "az": "us-east-1f",
+    "price": 2.0706,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 17.255000000000003
+   },
+   {
+    "type": "m7a.16xlarge",
+    "az": "us-east-1d",
+    "price": 1.071,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 3.06
+   },
+   {
+    "type": "c8a.24xlarge",
+    "az": "us-east-1d",
+    "price": 1.2333,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 1.761857142857143
+   },
+   {
+    "type": "c8a.16xlarge",
+    "az": "us-east-1f",
+    "price": 0.7777,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.5554000000000001
+   },
+   {
+    "type": "c7i.16xlarge",
+    "az": "us-east-1a",
+    "price": 1.8198,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 6.066000000000001
+   },
+   {
+    "type": "c7g.16xlarge",
+    "az": "us-east-1f",
+    "price": 1.1672,
+    "gph": 12000,
+    "vcpu": 64,
+    "usd_per_100k": 9.726666666666667
+   },
+   {
+    "type": "r7i.16xlarge",
+    "az": "us-east-1c",
+    "price": 2.1464,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 7.1546666666666665
+   },
+   {
+    "type": "r7a.16xlarge",
+    "az": "us-east-1c",
+    "price": 1.055,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 3.0142857142857142
+   },
+   {
+    "type": "r7a.16xlarge",
+    "az": "us-east-1d",
+    "price": 1.6439,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 4.696857142857143
+   },
+   {
+    "type": "m8g.24xlarge",
+    "az": "us-east-1d",
+    "price": 0.9529,
+    "gph": 22000,
+    "vcpu": 96,
+    "usd_per_100k": 4.331363636363636
+   },
+   {
+    "type": "m7i.16xlarge",
+    "az": "us-east-1b",
+    "price": 0.9071,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 3.0236666666666667
+   },
+   {
+    "type": "m7i.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.9161,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 3.053666666666667
+   },
+   {
+    "type": "c8a.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.8893,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.7786
+   },
+   {
+    "type": "c7i.16xlarge",
+    "az": "us-east-1b",
+    "price": 2.0917,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 6.972333333333333
+   },
+   {
+    "type": "c7a.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.9666,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 2.7617142857142856
+   },
+   {
+    "type": "m8a.48xlarge",
+    "az": "us-east-1c",
+    "price": 2.9381,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.511196581196581
+   },
+   {
+    "type": "m8a.48xlarge",
+    "az": "us-east-1b",
+    "price": 3.1996,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.7347008547008547
+   },
+   {
+    "type": "m7a.16xlarge",
+    "az": "us-east-1b",
+    "price": 1.0276,
+    "gph": 35000,
+    "vcpu": 64,
+    "usd_per_100k": 2.9360000000000004
+   },
+   {
+    "type": "c8g.16xlarge",
+    "az": "us-east-1f",
+    "price": 1.048,
+    "gph": 15000,
+    "vcpu": 64,
+    "usd_per_100k": 6.986666666666666
+   },
+   {
+    "type": "c8a.16xlarge",
+    "az": "us-east-1a",
+    "price": 1.2338,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 2.4676
+   },
+   {
+    "type": "c7i.16xlarge",
+    "az": "us-east-1d",
+    "price": 1.3465,
+    "gph": 30000,
+    "vcpu": 64,
+    "usd_per_100k": 4.488333333333333
+   },
+   {
+    "type": "m8a.metal-48xl",
+    "az": "us-east-1c",
+    "price": 2.4654,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 2.107179487179487
+   },
+   {
+    "type": "m8a.16xlarge",
+    "az": "us-east-1b",
+    "price": 0.9812,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.9624000000000001
+   },
+   {
+    "type": "m8a.16xlarge",
+    "az": "us-east-1a",
+    "price": 0.8331,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.6661999999999997
+   }
+  ]
+ },
+ "summary": {
+  "at": 1794523442.4092317,
+  "wanted": {
+   "on7": 4
+  },
+  "target_gph": 132000,
+  "supply": {
+   "on7": 55882.352941176476
+  },
+  "free_vcpus": 0,
+  "boxes": [
+   {
+    "id": "i-07a3009833282a130",
+    "type": "m8a.24xlarge",
+    "az": "us-east-1b",
+    "state": "running",
+    "launched": 1794507227.0,
+    "pool": "m8a.24xlarge@us-east-1b",
+    "arm": "on7",
+    "usd_per_100k": 3.220285714285714
+   },
+   {
+    "id": "i-00516dd44ec7a14c0",
+    "type": "m8a.24xlarge",
+    "az": "us-east-1b",
+    "state": "running",
+    "launched": 1794507289.0,
+    "pool": "m8a.24xlarge@us-east-1b",
+    "arm": "on7",
+    "usd_per_100k": 3.220285714285714
+   },
+   {
+    "id": "i-0a7e72a9bb6481eea",
+    "type": "c8a.16xlarge",
+    "az": "us-east-1b",
+    "state": "running",
+    "launched": 1794511058.0,
+    "pool": "c8a.16xlarge@us-east-1b",
+    "arm": "on7",
+    "usd_per_100k": 2.0312
+   }
+  ],
+  "pools": [
+   {
+    "type": "m8a.metal-48xl",
+    "az": "us-east-1d",
+    "price": 1.1685,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 0.9987179487179487,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "m8a.metal-48xl",
+    "az": "us-east-1f",
+    "price": 1.5438,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 1.3194871794871794,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "c8a.24xlarge",
+    "az": "us-east-1f",
+    "price": 1.047,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 1.4957142857142856,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "c8a.16xlarge",
+    "az": "us-east-1f",
+    "price": 0.7777,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.5554000000000001,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "r8a.24xlarge",
+    "az": "us-east-1d",
+    "price": 1.1014,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 1.5734285714285712,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "m8a.16xlarge",
+    "az": "us-east-1a",
+    "price": 0.8331,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.6661999999999997,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "c8a.24xlarge",
+    "az": "us-east-1d",
+    "price": 1.2333,
+    "gph": 70000,
+    "vcpu": 96,
+    "usd_per_100k": 1.761857142857143,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "c8a.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.8893,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.7786,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "c8a.metal-48xl",
+    "az": "us-east-1a",
+    "price": 2.2272,
+    "gph": 117000,
+    "vcpu": 192,
+    "usd_per_100k": 1.9035897435897435,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "m8a.16xlarge",
+    "az": "us-east-1b",
+    "price": 0.9812,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.9624000000000001,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "m8a.16xlarge",
+    "az": "us-east-1d",
+    "price": 0.9881,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 1.9761999999999997,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   },
+   {
+    "type": "m8a.16xlarge",
+    "az": "us-east-1f",
+    "price": 1.0068,
+    "gph": 50000,
+    "vcpu": 64,
+    "usd_per_100k": 2.0136,
+    "cooling": false,
+    "fails": 0,
+    "eligible": true
+   }
+  ]
+ },
+ "handover": {},
+ "learner_seen": {
+  "on1": 1794407314.1840985,
+  "on2": 1794420173.1137598,
+  "on3": 1794432138.7453823,
+  "on4": 1794457262.437078,
+  "on5": 1794461576.312455,
+  "on6": 1794490590.7050302,
+  "sp4": 1794492595.7186913,
+  "on7": 1794523441.71505
+ }
+}

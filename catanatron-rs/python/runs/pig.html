@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pig Benchmark</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 12px 16px; background: #fafafa; color: #222; }
+  .nav { font-size: 14px; margin: 0 0 6px; } .nav a { color: #1f5fa8; }
+  h1 { font-size: 20px; margin: 0 0 8px; } h2 { font-size: 16px; margin: 20px 0 8px; }
+  .card { background: #fff; border: 1px solid #ddd; padding: 8px; border-radius: 4px; } .card .c { position: relative; height: 280px; }
+  table { border-collapse: collapse; background: #fff; font-variant-numeric: tabular-nums; }
+  td, th { border: 1px solid #ddd; padding: 3px 8px; text-align: right; } th { background: #f0f0f0; }
+  td:first-child, th:first-child { text-align: left; } .muted { color: #888; } .scroll { overflow-x: auto; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; margin: 8px 0 12px; }
+  .tile { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 6px 10px; } .tile span { display: block; font-size: 12px; color: #666; } .tile b { font-size: 18px; }
+  .win { color: #2e7d32; } .loss { color: #c62828; } code.line { display: block; background: #fff; border: 1px solid #ddd; padding: 6px; margin: 6px 0; white-space: pre-wrap; font-size: 12px; }
+  select { font: inherit; padding: 2px 4px; } .live { color: #2e7d32; font-weight: 600; }
+</style>
+</head>
+<body>
+<nav class="nav"><a href="/">training</a> · <a href="/specialists">specialists</a> · <a href="/specialists?batch=sp4">sp4</a> · <a href="/pig">pig</a> · <a href="/experiments">experiments</a> · <a href="/optimizations">optimizations</a></nav>
+<h1>Pig benchmark: our bots against colonizing-pig in its own engine</h1>
+<p class="muted">Colonist 1v1 rules, 15 points, our side at the key's search budget (30k sims in the random-board matches), seats alternating. Pick a match:
+  <select id="pick"></select> <span id="live"></span></p>
+<div class="tiles" id="tiles"></div>
+<code class="line" id="log"></code>
+<h2>Running tally (win rate after each finished game, ±1 SE)</h2>
+<div class="card"><div class="c"><canvas id="tally"></canvas></div></div>
+<h2>Games</h2><div class="scroll"><table id="games"></table></div>
+<h2>All matches</h2><div class="scroll" id="all"></div>
+<p class="muted" id="status"></p>
+<script>
+const $ = id => document.getElementById(id);
+const fmt = (v, d) => v == null ? '<span class="muted">-</span>' : v.toFixed(d);
+const pct = w => w == null || w.n === 0 ? '<span class="muted">-</span>' : `${(100 * w.wr).toFixed(1)}% ±${(100 * w.se).toFixed(1)} (${w.n})`;
+const elo = p => p <= 0 || p >= 1 ? null : -400 * Math.log10(1 / p - 1);
+let chart = null, selected = new URLSearchParams(location.search).get('file');
+
+function drawAll(pig) {
+  let h = '<table><tr><th>file</th><th>games</th><th>win rate ±1SE</th><th>Elo</th><th>as first</th><th>as second</th><th>turns</th><th>our pts</th><th>Pig pts</th><th>our s/game</th><th>Pig s/game</th></tr>';
+  for (const p of pig) h += `<tr><td><a href="/pig?file=${p.file}">${p.file}</a></td><td>${p.all.n}</td><td>${pct(p.all)}</td><td>${p.all.wr == null ? '-' : fmt(elo(p.all.wr), 0)}</td><td>${pct(p.first)}</td><td>${pct(p.second)}</td>
+    <td>${fmt(p.turns, 1)}</td><td>${fmt(p.our_points, 2)}</td><td>${fmt(p.pig_points, 2)}</td><td>${fmt(p.our_seconds, 0)}</td><td>${fmt(p.pig_seconds, 0)}</td></tr>`;
+  $('all').innerHTML = h + '</table>';
+}
+
+function drawMatch(m) {
+  const g = m.games, n = g.length, wins = g.filter(x => x.we_won).length, p = n ? wins / n : null, se = n ? Math.sqrt(p * (1 - p) / n) : null;
+  const seat = s => { const gs = g.filter(x => x.our_seat === s); const w = gs.filter(x => x.we_won).length; return gs.length ? `${w}/${gs.length} = ${(100 * w / gs.length).toFixed(0)}%` : '-'; };
+  const tile = (l, v) => `<div class="tile"><span>${l}</span><b>${v}</b></div>`;
+  $('live').innerHTML = m.running ? '<span class="live">● running</span>' : '<span class="muted">finished / stopped</span>';
+  $('tiles').innerHTML = tile('games', `${n}${m.planned ? ' / ' + m.planned : ''}`) + tile('win rate', n ? `${(100 * p).toFixed(1)}% ±${(100 * se).toFixed(1)}` : '-') +
+    tile('Elo vs Pig', n && p > 0 && p < 1 ? (elo(p) > 0 ? '+' : '') + elo(p).toFixed(0) : '-') + tile('as first seat', seat(0)) + tile('as second seat', seat(1)) +
+    tile('mean turns', n ? (g.reduce((a, x) => a + (x.turns || 0), 0) / n).toFixed(1) : '-') +
+    tile('our s / Pig s per game', n ? `${(g.reduce((a, x) => a + (x.our_seconds || 0), 0) / n).toFixed(0)} / ${(g.reduce((a, x) => a + (x.pig_seconds || 0), 0) / n).toFixed(0)}` : '-');
+  $('log').textContent = m.log.join('\n') || 'no log yet';
+  let w = 0; const tally = [], hi = [], lo = [];
+  g.forEach((x, i) => { w += x.we_won ? 1 : 0; const q = w / (i + 1), s = Math.sqrt(q * (1 - q) / (i + 1)); tally.push(100 * q); hi.push(100 * Math.min(1, q + s)); lo.push(100 * Math.max(0, q - s)); });
+  const labels = g.map((_, i) => i + 1);
+  const ds = [{label: 'win rate %', data: tally, borderColor: '#1f77b4', borderWidth: 2, pointRadius: 0, tension: 0},
+              {label: '+1 SE', data: hi, borderColor: 'rgba(31,119,180,0.25)', borderWidth: 1, pointRadius: 0, fill: '+1', backgroundColor: 'rgba(31,119,180,0.08)'},
+              {label: '-1 SE', data: lo, borderColor: 'rgba(31,119,180,0.25)', borderWidth: 1, pointRadius: 0},
+              {label: '50%', data: labels.map(() => 50), borderColor: '#999', borderDash: [4, 4], borderWidth: 1, pointRadius: 0}];
+  if (!chart) chart = new Chart($('tally'), {type: 'line', data: {labels, datasets: ds}, options: {animation: false, maintainAspectRatio: false,
+    plugins: {legend: {display: false}}, scales: {y: {min: 0, max: 100, title: {display: true, text: 'win rate %'}}, x: {title: {display: true, text: 'games finished'}}}}});
+  else { chart.data.labels = labels; chart.data.datasets.forEach((d, i) => d.data = ds[i].data); chart.update('none'); }
+  $('games').innerHTML = '<tr><th>#</th><th>board</th><th>seat</th><th>result</th><th>score (us-Pig)</th><th>turns</th><th>our s</th><th>Pig s</th></tr>' +
+    g.map((x, i) => { const s = x.our_seat, pts = Array.isArray(x.points) ? `${x.points[s]}-${x.points[1 - s]}` : '-';
+      return `<tr><td>${i + 1}</td><td>${x.seed ?? x.board ?? '-'}</td><td>${s === 0 ? 'first' : 'second'}</td><td class="${x.we_won ? 'win' : 'loss'}">${x.we_won ? 'win' : 'loss'}</td><td>${pts}</td><td>${x.turns ?? '-'}</td><td>${fmt(x.our_seconds, 0)}</td><td>${fmt(x.pig_seconds, 0)}</td></tr>`; }).reverse().join('');
+}
+
+async function refresh() {
+  try {
+    const pig = await (await fetch('/api/pig', {cache: 'no-store'})).json();
+    drawAll(pig);
+    const files = pig.map(p => p.file);
+    if (!selected || !files.includes(selected)) {
+      const live = await (await fetch('/api/pig_games', {cache: 'no-store'})).json();
+      selected = live.file;
+    }
+    $('pick').innerHTML = files.map(f => `<option ${f === selected ? 'selected' : ''}>${f}</option>`).join('');
+    const m = await (await fetch('/api/pig_games?file=' + selected, {cache: 'no-store'})).json();
+    drawMatch(m);
+    $('status').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · refresh every 60 s';
+  } catch (e) { $('status').textContent = 'error: ' + e.message; }
+}
+$('pick').addEventListener('change', e => { selected = e.target.value; history.replaceState(null, '', '/pig?file=' + selected); refresh(); });
+refresh(); setInterval(refresh, 60000);
+</script>
+</body>
+</html>

@@ -1,0 +1,66 @@
+{
+ "region": "us-east-1",
+ "stack": "CatanSelfPlay",
+ "cluster": "catan-selfplay",
+ "task_definition": "catan-actor",
+ "launch_template": {
+  "id": "lt-05c2de0fa69864e48",
+  "version": "$Latest"
+ },
+ "vcpu_quota": 256,
+ "arms": {
+  "on7": 4
+ },
+ "unit_games_per_hour": 33000,
+ "types": {
+  "c7a.16xlarge": 35000,
+  "m7a.16xlarge": 35000,
+  "c8a.16xlarge": 50000,
+  "m8a.16xlarge": 50000,
+  "c8a.24xlarge": 70000,
+  "m8a.24xlarge": 70000,
+  "c8a.48xlarge": 117000,
+  "m8a.48xlarge": 117000,
+  "c8a.metal-48xl": 117000,
+  "m8a.metal-48xl": 117000,
+  "c8g.16xlarge": 15000,
+  "m8g.16xlarge": 15000,
+  "c7g.16xlarge": 12000,
+  "m7g.16xlarge": 12000,
+  "c8g.24xlarge": 22000,
+  "m8g.24xlarge": 22000,
+  "r8a.16xlarge": 50000,
+  "r8a.24xlarge": 70000,
+  "r7a.16xlarge": 35000,
+  "c7i.16xlarge": 30000,
+  "r7i.16xlarge": 30000,
+  "m7i.16xlarge": 30000
+ },
+ "types_note": "games/hour at the actor settings. Measured Nov 11 from shard play times: c8a.16xlarge 18.0 s per 256-game shard (51k/h, 802/h/core; 46k/h on Nov 10 with the endgame branch on); m8a.48xlarge 23.6 s per 768-game shard (117k/h, 611/h/core: 24% slower per core than the 16xlarge). Zen 4 16xlarge 33k/h measured Nov 10 (scaled to 35k for the shorter games). 24xlarge interpolated; metals assumed equal to the 48xlarge until measured. Graviton (c8g/m8g = Graviton 4, c7g/m7g = Graviton 3; image built for neoverse-v1) added Nov 11 08:20 as guesses: 16xlarge 45k (G4) / 33k (G3) games/h; correct from the shard logs once one has played. Graviton MEASURED Nov 11 09:40: c8g.16xlarge 60 s per 256-game shard = 15k games/h (3.3x slower than c8a.16xlarge: the engine's kernels are AVX2-tuned, the aarch64 build uses plain loops; image built for neoverse-v1). At $0.7-1.0/h that is $4.7-6.6 per 100k games, above the cap, so Graviton is effectively excluded. Nov 11 20:15 (evening capacity crunch, one box left): added r8a (= m8a cores, 50k/70k), r7a (= m7a, 35k) and Intel c7i/r7i/m7i.16xlarge at a GUESSED 30k (Sapphire Rapids, AVX2 kernels; measure from the actor logs when one runs) for more capacity pools.",
+ "max_usd_per_100k_games": 3.5,
+ "price_poll_minutes": 10,
+ "fail_limit": 1,
+ "cooldown_minutes": 20,
+ "migrate_saving": 0.2,
+ "migrate_after_minutes": 15,
+ "migrate_interval_minutes": 30,
+ "idle_terminate_minutes": 5,
+ "deadline_hours": 14,
+ "force_active": [],
+ "attempts_per_cycle": 6,
+ "launch_templates": {
+  "x86": "lt-05c2de0fa69864e48",
+  "arm": "lt-06f7469f109a8404b"
+ },
+ "migrate_pool_quiet_minutes": 60,
+ "arm_game_cost": {
+  "on2": 2.2,
+  "on3": 2.9,
+  "on4": 2.9,
+  "on5": 3.0,
+  "on6": 3.0,
+  "sp4": 3.0,
+  "on7": 3.4
+ },
+ "arm_game_cost_note": "games of this arm per reference game of the `types` table (measured on on1: 18 s per 256-game shard on c8a.16xlarge). on2 (structure block + 4 settlement forks): 40 s/shard = 2.2; on3 (+ relation block, 4072 inputs): ~52 s/shard = 2.9. Shares (`arms`, unit 33k) are then in the arm's own games/h; $/100k and the cap stay in reference units. on5 (+ award/port block, 4335 inputs): 3.0 guessed from on3; measure from shard play times."
+}

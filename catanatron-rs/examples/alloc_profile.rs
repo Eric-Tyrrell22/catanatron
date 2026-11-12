@@ -28,9 +28,38 @@ fn count(n: usize) {
     HIST[2 * b + 1].fetch_add(n as u64, Ordering::Relaxed);
 }
 
+/// With a third argument, every SAMPLE-th allocation's backtrace is kept
+/// (outside the sampler's own allocations) and the most common call sites
+/// printed at the end.
+const SAMPLE: u64 = 2000;
+static TRACE: AtomicU64 = AtomicU64::new(0);
+thread_local! { static IN_TRACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+static TRACES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+fn sample() {
+    if TRACE.load(Ordering::Relaxed) == 0 || ALLOCS.load(Ordering::Relaxed) % SAMPLE != 0 {
+        return;
+    }
+    IN_TRACE.with(|f| {
+        if f.replace(true) {
+            return;
+        }
+        let bt = std::backtrace::Backtrace::force_capture().to_string();
+        // Keep the crate's own frames: the first few catanatron:: functions.
+        let frames: Vec<&str> = bt
+            .lines()
+            .filter(|l| l.contains("catanatron::") && !l.contains("alloc_profile"))
+            .map(|l| l.trim().trim_start_matches(|c: char| c.is_ascii_digit() || c == ':' || c == ' '))
+            .take(3)
+            .collect();
+        TRACES.lock().unwrap().push(frames.join(" <- "));
+        f.set(false);
+    });
+}
+
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         count(l.size());
+        sample();
         System.alloc(l)
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
@@ -48,6 +77,7 @@ static A: Counting = Counting;
 fn main() {
     let model = std::env::args().nth(1).expect("model");
     let games: u64 = std::env::args().nth(2).map_or(4, |g| g.parse().expect("games"));
+    TRACE.store(std::env::args().nth(3).is_some() as u64, Ordering::Relaxed);
     let net = load_net(&model).expect("model");
     let cfg = SelfPlayConfig {
         sims_full: 400, sims_fast: 50, sims_placement: 2400, p_full: 0.25,
@@ -73,5 +103,18 @@ fn main() {
     for (i, name) in names.iter().enumerate() {
         let (c, b) = (HIST[2 * i].load(Ordering::Relaxed), HIST[2 * i + 1].load(Ordering::Relaxed));
         println!("  {name:7} {:6.1}% of allocations, {:5.1}% of bytes", 100.0 * c as f64 / a as f64, 100.0 * b as f64 / BYTES.load(Ordering::Relaxed) as f64);
+    }
+    let traces = TRACES.lock().unwrap();
+    if !traces.is_empty() {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for t in traces.iter() {
+            *counts.entry(t.as_str()).or_default() += 1;
+        }
+        let mut top: Vec<(&str, usize)> = counts.into_iter().collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("allocation sites (1 in {SAMPLE} sampled, {} samples):", traces.len());
+        for (site, c) in top.iter().take(25) {
+            println!("  {:5.1}%  {site}", 100.0 * *c as f64 / traces.len() as f64);
+        }
     }
 }

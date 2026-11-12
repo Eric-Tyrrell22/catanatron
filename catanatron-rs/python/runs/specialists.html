@@ -26,15 +26,15 @@
 </style>
 </head>
 <body>
-<nav class="nav"><a href="/">training</a> · <a href="/specialists">specialists</a> · <a href="/experiments">experiments</a> · <a href="/optimizations">optimizations</a></nav>
-<h1>Board specialists (sp3)</h1>
+<nav class="nav"><a href="/">training</a> · <a href="/specialists">specialists</a> · <a href="/specialists?batch=sp4">sp4</a> · <a href="/pig">pig</a> · <a href="/experiments">experiments</a> · <a href="/optimizations">optimizations</a></nav>
+<h1 id="title">Board specialists</h1>
 <div class="tiles" id="tiles"></div>
 <code class="line" id="current"></code>
-<h2>Specialist gap: win rate vs the generalist at iteration 20</h2>
+<h2 id="gaph">Specialist gap: win rate vs the base network at the last evaluation</h2>
 <div class="card"><div class="c"><canvas id="hist"></canvas></div></div>
 <h2>Boards</h2><div class="scroll"><table id="table"></table></div>
 <h2>Board drawings (top by gap, plus the running board)</h2><div class="boards" id="boards"></div>
-<h2>Earlier batch sp2 (4 boards, for reference)</h2><div class="scroll" id="sp2"></div>
+<div id="sp2wrap"><h2>Earlier batch sp2 (4 boards, for reference)</h2><div class="scroll" id="sp2"></div></div>
 <p class="muted" id="status"></p>
 <script>
 const $ = id => document.getElementById(id);
@@ -42,8 +42,20 @@ const pct = v => v == null ? '<span class="muted">-</span>' : (100 * v).toFixed(
 const fmt = (v, d) => v == null ? '<span class="muted">-</span>' : (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : v.toFixed(d));
 const hm = m => m == null ? '-' : (m >= 60 ? `${Math.floor(m / 60)} h ${Math.round(m % 60)} min` : `${Math.round(m)} min`);
 const TERRAIN = {forest: '#2e7d32', hills: '#c1693c', pasture: '#9ccc65', fields: '#f2c94c', mountains: '#8d8d8d', desert: '#e8d8a8'};
-const COLS = [['seed', 'seed', 0], ['status', 'status'], ['win10', 'win @10', 'p'], ['win20', 'win @20', 'p'], ['minutes', 'minutes', 1], ['games', 'games', 0]];
-let data = null, sortKey = 'win20', sortDir = -1, hist = null;
+const BATCH = new URLSearchParams(location.search).get('batch') || 'sp3';
+let COLS = [['seed', 'seed', 0], ['status', 'status'], ['final', 'final win', 'p'], ['minutes', 'minutes', 1], ['games', 'games', 0]];
+let data = null, sortKey = 'final', sortDir = -1, hist = null;
+const sgn = v => v == null ? '<span class="muted">-</span>' : `<span style="color:${v > 0 ? '#2e7d32' : v < 0 ? '#c62828' : '#555'}">${v > 0 ? '+' : ''}${(100 * v).toFixed(1)}</span>`;
+function setCols(sp) {
+  if (BATCH === 'sp3') {
+    const iters = [...new Set(sp.finished.flatMap(r => Object.keys(r.evals).map(Number)))].sort((a, b) => a - b);
+    COLS = [['seed', 'seed', 0], ['status', 'status'], ...iters.map(i => [`ev${i}`, `win @${i}`, 'p']), ['final', 'final win', 'p'], ['minutes', 'minutes', 1], ['games', 'games', 0]];
+    for (const r of [...sp.finished, ...sp.running]) for (const i of iters) r[`ev${i}`] = r.evals[i];
+  } else {
+    COLS = [['seed', 'seed', 0], ['status', 'status'], ['final', `final win vs ${data.base}`, 'p'], ['delta', 'gap vs sp3\'s gap (pts)', 's'],
+            ['h2h_nn', 'vs sp3 specialist, network only', 'p'], ['h2h_search', 'vs sp3, both 600 sims', 'p'], ['minutes', 'minutes', 1], ['games', 'games', 0]];
+  }
+}
 
 function tile(label, value) { return `<div class="tile"><span>${label}</span><b>${value}</b></div>`; }
 
@@ -65,23 +77,27 @@ function boardSvg(layout) {
 }
 
 function drawTable() {
-  const sp = data.sp3, rows = [...sp.finished].sort((a, b) => {
+  const sp = data.main, rows = [...sp.finished].sort((a, b) => {
     const x = a[sortKey], y = b[sortKey];
     return x == null ? 1 : y == null ? -1 : (x < y ? -1 : x > y ? 1 : 0) * sortDir;
   });
   const all = [...sp.running.filter(r => r.status === 'running'), ...rows];
   const head = '<tr>' + COLS.map(([k, l]) => `<th data-k="${k}">${l}${k === sortKey ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
   $('table').innerHTML = head + (all.length ? all.map(r => `<tr class="${r.status === 'running' ? 'running' : ''}">` +
-    COLS.map(([k, , d]) => `<td>${d === 'p' ? pct(r[k]) : d == null ? (r.status === 'running' ? `running (it ${r.iter ?? '-'})` : r[k]) : k === 'seed' ? r[k] : fmt(r[k], d)}</td>`).join('') + '</tr>').join('')
-    : '<tr><td colspan="6" class="muted">no boards yet</td></tr>');
+    COLS.map(([k, , d]) => `<td>${d === 'p' ? pct(r[k]) : d === 's' ? sgn(r[k]) : d == null ? (r.status === 'running' ? `running (it ${r.iter ?? '-'})` : r[k]) : k === 'seed' ? r[k] : fmt(r[k], d)}</td>`).join('') + '</tr>').join('')
+    : `<tr><td colspan="${COLS.length}" class="muted">no boards yet</td></tr>`);
 }
 
 function draw() {
-  const sp = data.sp3, run = sp.running.filter(r => r.status === 'running');
+  const sp = data.main, run = sp.running.filter(r => r.status === 'running');
+  setCols(sp);
+  $('title').textContent = `Board specialists (${data.batch}): fine-tuned from ${data.base} on each panel board`;
+  $('gaph').textContent = `Specialist gap: win rate vs the ${data.base} base at the last evaluation (50% = no gain)`;
   $('tiles').innerHTML = tile('finished', `${sp.finished.length} / ${sp.total}`) + tile('in progress', run.map(r => r.seed).join(', ') || '0') +
     tile('median per board', hm(sp.median_minutes)) + tile('est. remaining', hm(sp.eta_minutes)) +
-    tile('mean gap (win @20)', pct(sp.final_mean)) + tile('boards > 60%', sp.above60) + tile('boards > 70%', sp.above70);
-  $('current').textContent = sp.current_line || 'no sp3.out yet';
+    tile('mean gap (final win)', pct(sp.final_mean)) + tile('boards > 60%', sp.above60) + tile('boards > 70%', sp.above70) +
+    (BATCH === 'sp3' ? '' : tile('mean gap vs sp3\'s gap', sgn(sp.delta_mean)) + tile(`vs sp3 specialists, network only (${sp.h2h_n} boards)`, pct(sp.h2h_nn_mean)) + tile('vs sp3, both 600 sims', pct(sp.h2h_search_mean)));
+  $('current').textContent = sp.current_line || `no ${data.batch}.out yet`;
 
   const lo = 0.3, step = 0.05, bins = Array(14).fill(0);  // 30%..100% in 5-point bins
   for (const r of sp.finished) if (r.final != null) bins[Math.max(0, Math.min(13, Math.floor((r.final - lo) / step + 1e-9)))]++;
@@ -98,6 +114,8 @@ function draw() {
     : drawn.length ? drawn.map(r => `<div class="board ${r.status === 'running' ? 'running' : ''}">${boardSvg(r.layout)}<br>${r.seed} · ${r.status === 'running' ? 'running' : pct(r.final)}</div>`).join('')
     : '<span class="muted">no boards yet</span>';
 
+  $('sp2wrap').style.display = data.sp2 ? '' : 'none';
+  if (!data.sp2) return;
   const s2 = data.sp2, iters = [...new Set(s2.finished.flatMap(r => Object.keys(r.evals).map(Number)))].sort((a, b) => a - b);
   $('sp2').innerHTML = `<table><tr><th>seed</th>${iters.map(i => `<th>win @${i}</th>`).join('')}<th>minutes</th><th>games</th></tr>` +
     s2.finished.map(r => `<tr><td>${r.seed}</td>${iters.map(i => `<td>${pct(r.evals[i])}</td>`).join('')}<td>${fmt(r.minutes, 1)}</td><td>${fmt(r.games, 0)}</td></tr>`).join('') +
@@ -112,7 +130,7 @@ $('table').addEventListener('click', e => {
 
 async function refresh() {
   try {
-    const r = await fetch('/api/specialists', {cache: 'no-store'});
+    const r = await fetch('/api/specialists?batch=' + BATCH, {cache: 'no-store'});
     if (!r.ok) throw new Error('/api/specialists ' + r.status);
     data = await r.json(); draw();
     $('status').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · refresh every 60 s';

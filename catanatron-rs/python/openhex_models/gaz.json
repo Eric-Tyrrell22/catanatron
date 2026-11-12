@@ -1,0 +1,15 @@
+{
+  "bot": "Gaz",
+  "source": "runs/on3/snap_000350.ctnn + runs/on3/osnap_000350.ctnn (main network + opening network)",
+  "iteration": 350,
+  "run": "on3",
+  "lineage": "Ham (o3-187) -> on1 (separate opening network, 826k games) -> on2 (+ structure block, 254k) -> on3 (+ opening-relation block, 164k)",
+  "network": "main 4x512 and opening 4x512, 4072 inputs (spot structure + opening relation blocks); the opening network takes the initial placements",
+  "frozen_at": "2026-11-11 18:35",
+  "think_ms": 5000,
+  "vs_ham_network_only": "55.3-56.2% (10,000 random-board games per snapshot, last three snapshots)",
+  "panel100_network_only": "38.6-39.2% vs the 100 board specialists (Ham 33.7, o3-187 33.4)",
+  "vs_pig_random_boards": "47.5% of 59 (MCTS 30k both sides; Ham 44.6%, on1 47.5%)",
+  "requires": "the opening-net branch extension (catanatron-opening target/pylib): bot key main.ctnn@opening.ctnn",
+  "note": "5 s per move (Ham played with 10 s)"
+}

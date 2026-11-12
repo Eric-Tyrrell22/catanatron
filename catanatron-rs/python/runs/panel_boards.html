@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Per-Board Panel</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --surface: #fff; --page: #fafafa; --ink: #222; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: #ddd;
+    --run: #2a78d6;      /* slot 1: the selected run */
+    --base-a: #eb6834;   /* slot 2: compare baseline (markers, scatter x, histogram) */
+    --base-b: #1baf7a;   /* slot 3: second marker baseline */
+    --div-neg: #e34948; --div-mid: #f0efec; --div-pos: #2a78d6;
+    --seq-lo: #cde2fb; --seq-hi: #0d366b;
+  }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 12px 16px; background: var(--page); color: var(--ink); }
+  .nav { font-size: 14px; margin: 0 0 6px; } .nav a { color: #1f5fa8; }
+  h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 16px; margin: 20px 0 8px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 8px 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 12px; margin-top: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--border); padding: 8px; border-radius: 4px; }
+  .card h3 { font-size: 13px; margin: 0 0 2px; font-weight: 600; }
+  .card .sub { font-size: 12px; color: var(--ink-2); margin: 0 0 6px; }
+  .card .c { position: relative; height: 300px; }
+  .wide { margin-top: 12px; }
+  table { border-collapse: collapse; background: var(--surface); font-variant-numeric: tabular-nums; }
+  td, th { border: 1px solid var(--border); padding: 3px 8px; text-align: right; } th { background: #f0f0f0; }
+  td:first-child, th:first-child { text-align: left; }
+  .muted { color: var(--muted); } .err { color: #b00; } .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: -1px; }
+  .scroll { overflow-x: auto; }
+  .tables { display: flex; flex-wrap: wrap; gap: 16px; }
+  .stats { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  #heatWrap { position: relative; }
+  #heat { display: block; width: 100%; }
+  #tip { position: fixed; pointer-events: none; background: rgba(0,0,0,0.8); color: #fff; font-size: 12px; padding: 4px 6px; border-radius: 4px; display: none; white-space: nowrap; z-index: 10; }
+  .legendbar { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+  .legendbar canvas { width: 160px; height: 10px; border-radius: 2px; }
+  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<nav class="nav"><a href="/">training</a> · <a href="/specialists">specialists</a> · <a href="/specialists?batch=sp4">sp4</a> · <a href="/pig">pig</a> · <a href="/experiments">experiments</a> · <a href="/optimizations">optimizations</a></nav>
+<h1 id="title">Per-board panel</h1>
+<div id="info" class="muted"></div>
+<div class="bar">
+  <label>run <select id="run"></select></label>
+  <label>snapshot <select id="snap"></select></label>
+  <label><span class="sw" style="background:var(--base-a)"></span>compare baseline <select id="baseA"></select></label>
+  <label><span class="sw" style="background:var(--base-b)"></span>second marker <select id="baseB"></select></label>
+  <span id="status" class="muted"></span>
+</div>
+<div id="note" class="muted"></div>
+<div class="stats" id="stats"></div>
+
+<div class="card wide">
+  <h3>Per-board win rate, boards sorted by the run (weakest left)</h3>
+  <div class="sub">Bars: the run's win rate vs each board's specialist. Markers: the baselines on the same board. Dashed line: the run's panel mean.</div>
+  <div class="c"><canvas id="sorted"></canvas></div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h3 id="scatterTitle">Run vs baseline, per board</h3>
+    <div class="sub" id="scatterSub"></div>
+    <div class="c"><canvas id="scatter"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>Distribution of per-board win rates</h3>
+    <div class="sub">Number of boards per 2.5-point bin.</div>
+    <div class="c"><canvas id="hist"></canvas></div>
+  </div>
+</div>
+
+<div class="card wide">
+  <h3>Board by snapshot</h3>
+  <div class="sub" id="heatSub"></div>
+  <div class="bar" id="heatCtl"><label>color <select id="heatMode"><option value="dev" selected>board minus that snapshot's panel mean (pp)</option><option value="abs">win rate (%)</option></select></label></div>
+  <div id="heatWrap"><canvas id="heat"></canvas></div>
+  <div class="legendbar" id="heatLegend"></div>
+</div>
+
+<h2>Weakest and strongest boards at this snapshot</h2>
+<div class="tables" id="tables"></div>
+<div id="tip"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const C = {run: css('--run'), a: css('--base-a'), b: css('--base-b'), ink: css('--ink'), ink2: css('--ink-2'), muted: css('--muted'),
+  grid: css('--grid'), axis: css('--axis'), surface: css('--surface')};
+const PANEL_GAMES = 400;  // games per board in a run's panel line (the follower's setting, see the dashboard's Board panel header)
+const DEFAULT_A = 'on1@826k', DEFAULT_B = 'Ham';
+const fmt = (v, d = 1) => v == null ? '<span class="muted">no data</span>' : v.toFixed(d);
+const fmtT = (v, d = 1) => v == null ? 'no data' : v.toFixed(d);
+
+Chart.defaults.font.family = 'system-ui, sans-serif';
+Chart.defaults.font.size = 11;
+Chart.defaults.color = C.ink2;
+Chart.defaults.borderColor = C.grid;
+Chart.defaults.animation = false;
+
+let D = null, charts = {}, runName = new URLSearchParams(location.search).get('run');
+
+async function getJSON(u) {
+  const r = await fetch(u, {cache: 'no-store'});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+
+function baseline(label) { return D.baselines.find(b => b.label === label) || null; }
+function spec(seed) { return D.specialists[seed] || null; }
+function snapName(l) { return l.iter != null ? 'snap ' + l.iter : l.label; }
+function axes(xTitle, yTitle, extra = {}) {
+  const ax = t => ({title: {display: !!t, text: t, color: C.ink2}, grid: {color: C.grid}, border: {color: C.axis}, ticks: {color: C.muted}});
+  const x = Object.assign(ax(xTitle), extra.x || {}), y = Object.assign(ax(yTitle), extra.y || {});
+  return {x, y};
+}
+function mk(id, cfg) { if (charts[id]) charts[id].destroy(); charts[id] = new Chart($(id), cfg); }
+
+function pearson(xs, ys) {
+  const n = xs.length; if (n < 3) return null;
+  const mx = xs.reduce((a, b) => a + b) / n, my = ys.reduce((a, b) => a + b) / n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) ** 2; syy += (ys[i] - my) ** 2; }
+  return sxy / Math.sqrt(sxx * syy);
+}
+// two-sided 2-SE half-width (pp) of run% - baseline% on one board at win rate p (%), from the two game counts
+const band2se = (p, gBase) => 200 * Math.sqrt((p / 100) * (1 - p / 100) * (1 / PANEL_GAMES + 1 / gBase));
+
+function fillSelects() {
+  const opts = (sel, def) => ['<option value="">none</option>'].concat(D.baselines.map(b =>
+    `<option value="${b.label}" ${b.label === def ? 'selected' : ''}>${b.label} (mean ${b.mean.toFixed(1)}%)</option>`)).join('');
+  $('baseA').innerHTML = opts('A', DEFAULT_A);
+  $('baseB').innerHTML = opts('B', DEFAULT_B);
+  const missing = [DEFAULT_A, DEFAULT_B].filter(l => !baseline(l));
+  $('note').textContent = missing.length ? `default baseline${missing.length > 1 ? 's' : ''} ${missing.join(', ')} not in runs/panel100/` : '';
+  $('snap').innerHTML = D.lines.map((l, i) => `<option value="${i}" ${i === D.lines.length - 1 ? 'selected' : ''}>${snapName(l)} (mean ${l.mean.toFixed(1)}%)</option>`).reverse().join('');
+}
+
+function draw() {
+  const line = D.lines[+$('snap').value];
+  const A = baseline($('baseA').value), B = baseline($('baseB').value);
+  const boards = Object.entries(line.boards).sort((p, q) => p[1] - q[1]);  // [[seed, pct]] weakest first
+  const seeds = boards.map(([s]) => s), vals = boards.map(([, v]) => v);
+  const bv = (bl, s) => bl && bl.boards[s] != null ? bl.boards[s] : null;
+  const shared = A ? seeds.filter(s => bv(A, s) != null) : [];
+
+  // stats line
+  let st = `${snapName(line)}: mean ${line.mean.toFixed(1)}% over ${seeds.length} boards · min ${vals[0].toFixed(1)} · max ${vals[vals.length - 1].toFixed(1)}`;
+  if (A) {
+    if (shared.length) {
+      const r = pearson(shared.map(s => bv(A, s)), shared.map(s => line.boards[s]));
+      const up = shared.filter(s => line.boards[s] - bv(A, s) > band2se(bv(A, s), A.games)).length;
+      const dn = shared.filter(s => bv(A, s) - line.boards[s] > band2se(bv(A, s), A.games)).length;
+      st += ` · vs ${A.label} (mean ${A.mean.toFixed(1)}%): r = ${r == null ? 'n/a' : r.toFixed(2)} over ${shared.length} shared boards, ${up} above / ${dn} below the ±2 SE band`;
+    } else st += ` · ${A.label} has none of this run's boards`;
+  }
+  $('stats').textContent = st;
+
+  // (a) sorted per-board chart
+  const ds = [{type: 'bar', label: D.run, data: vals, backgroundColor: C.run, borderRadius: {topLeft: 4, topRight: 4}, borderSkipped: 'start',
+    barPercentage: 0.75, categoryPercentage: 1, order: 3}];
+  ds.push({type: 'line', label: `${D.run} mean`, data: seeds.map(() => line.mean), borderColor: C.ink2, borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, pointHitRadius: 0, order: 2});
+  for (const [bl, color, style] of [[A, C.a, 'circle'], [B, C.b, 'triangle']]) {
+    if (!bl || (bl === A && B === A && style === 'triangle')) continue;
+    ds.push({type: 'line', label: bl.label, data: seeds.map(s => bv(bl, s)), showLine: false, pointStyle: style, pointRadius: 4.5, pointHoverRadius: 6,
+      pointBackgroundColor: color, pointBorderColor: C.surface, pointBorderWidth: 1.5, order: 1});
+  }
+  mk('sorted', {data: {labels: seeds, datasets: ds}, options: {maintainAspectRatio: false,
+    interaction: {mode: 'index', intersect: false},
+    scales: axes(`${seeds.length} boards, sorted by ${D.run} win rate`, 'win rate vs specialist (%)',
+      {x: {ticks: {display: false}, grid: {display: false}}, y: {beginAtZero: true}}),
+    plugins: {legend: {labels: {usePointStyle: true, boxWidth: 8, font: {size: 11}}},
+      tooltip: {callbacks: {title: it => `board ${it[0].label} (rank ${it[0].dataIndex + 1} of ${seeds.length})`,
+        label: it => it.dataset.label + ': ' + (it.raw == null ? 'no data' : it.raw.toFixed(1) + '%'),
+        footer: it => { const sp = spec(it[0].label); return sp ? `specialist ${sp.run}: ${(100 * sp.best_win).toFixed(1)}% vs base (it ${sp.best_iter})` : 'specialist: no data'; }}}}}});
+
+  // (b) scatter run vs compare baseline
+  $('scatterTitle').textContent = A ? `${D.run} vs ${A.label}, per board` : 'Run vs baseline, per board';
+  if (!A || !shared.length) {
+    $('scatterSub').textContent = A ? `${A.label} has none of this run's boards.` : 'Pick a compare baseline.';
+    if (charts.scatter) { charts.scatter.destroy(); delete charts.scatter; }
+  } else {
+    const pts = shared.map(s => ({x: bv(A, s), y: line.boards[s], seed: s}));
+    const all = pts.flatMap(p => [p.x, p.y]);
+    const lo = Math.floor(Math.min(...all) / 5) * 5, hi = Math.ceil(Math.max(...all) / 5) * 5;
+    const xs = Array.from({length: 21}, (_, i) => lo + (hi - lo) * i / 20);
+    $('scatterSub').textContent = `Above the diagonal: the run beats ${A.label} on that board. Dotted: ±2 SE of the difference (${PANEL_GAMES} vs ${A.games} games per board).`;
+    mk('scatter', {type: 'scatter', data: {datasets: [
+      {label: 'boards', data: pts, backgroundColor: C.run, borderColor: C.surface, borderWidth: 1.5, pointRadius: 4.5, pointHoverRadius: 6, order: 1},
+      {type: 'line', label: 'equal', data: [{x: lo, y: lo}, {x: hi, y: hi}], borderColor: C.ink2, borderWidth: 1.5, pointRadius: 0, pointHitRadius: 0, order: 2},
+      {type: 'line', label: '+2 SE', data: xs.map(x => ({x, y: x + band2se(x, A.games)})), borderColor: C.axis, borderDash: [2, 3], borderWidth: 1.5, pointRadius: 0, pointHitRadius: 0, order: 3},
+      {type: 'line', label: '-2 SE', data: xs.map(x => ({x, y: x - band2se(x, A.games)})), borderColor: C.axis, borderDash: [2, 3], borderWidth: 1.5, pointRadius: 0, pointHitRadius: 0, order: 3},
+    ]}, options: {maintainAspectRatio: false,
+      scales: axes(`${A.label} win rate (%)`, `${D.run} win rate (%)`, {x: {min: lo, max: hi}, y: {min: lo, max: hi}}),
+      plugins: {legend: {display: false},
+        tooltip: {filter: it => it.datasetIndex === 0, callbacks: {
+          title: it => `board ${it[0].raw.seed}`,
+          label: it => [`${D.run}: ${it.raw.y.toFixed(1)}%`, `${A.label}: ${it.raw.x.toFixed(1)}%`, `difference: ${(it.raw.y - it.raw.x >= 0 ? '+' : '') + (it.raw.y - it.raw.x).toFixed(1)} pp`],
+          footer: it => { const sp = spec(it[0].raw.seed); return sp ? `specialist: ${(100 * sp.best_win).toFixed(1)}% vs base` : 'specialist: no data'; }}}}}});
+  }
+
+  // (c) histogram
+  const sets = [[D.run, vals, C.run]];
+  if (A) sets.push([A.label, Object.values(A.boards), C.a]);
+  const allv = sets.flatMap(s => s[1]), W = 2.5;
+  const b0 = Math.floor(Math.min(...allv) / W) * W, nb = Math.floor((Math.max(...allv) - b0) / W) + 1;
+  const bins = Array.from({length: nb}, (_, i) => b0 + i * W);
+  mk('hist', {type: 'bar', data: {labels: bins.map(x => x.toFixed(1)), datasets: sets.map(([label, v, color]) => ({label: `${label} (${v.length} boards)`,
+    data: bins.map(x => v.filter(y => y >= x && y < x + W).length), backgroundColor: color, borderRadius: {topLeft: 4, topRight: 4}, borderSkipped: 'start',
+    barPercentage: 0.85, categoryPercentage: 0.85}))},
+    options: {maintainAspectRatio: false, interaction: {mode: 'index', intersect: false},
+      scales: axes('win rate vs specialist (%), bin start', 'boards', {y: {beginAtZero: true, ticks: {precision: 0, color: C.muted}}}),
+      plugins: {legend: {labels: {boxWidth: 12, font: {size: 11}}},
+        tooltip: {callbacks: {title: it => `${bins[it[0].dataIndex].toFixed(1)}–${(bins[it[0].dataIndex] + W).toFixed(1)}%`, label: it => `${it.dataset.label.split(' (')[0]}: ${it.raw} boards`}}}}});
+
+  drawHeat(seeds, line);
+  drawTables(boards, A, B);
+}
+
+// ---- (d) heatmap: rows = boards in the order of chart (a), columns = snapshots in file order
+function hex2rgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+function mix(c1, c2, t) { const a = hex2rgb(c1), b = hex2rgb(c2); return `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(',')})`; }
+let heat = null;
+function drawHeat(seeds, selLine) {
+  const L = D.lines, cv = $('heat');
+  if (L.length < 2) {
+    $('heatSub').textContent = 'Only one panel line so far; the heatmap needs at least two snapshots.';
+    $('heatCtl').style.display = 'none'; cv.style.display = 'none'; $('heatLegend').innerHTML = ''; heat = null; return;
+  }
+  $('heatCtl').style.display = ''; cv.style.display = '';
+  const mode = $('heatMode').value;
+  const val = (l, s) => l.boards[s] == null ? null : (mode === 'dev' ? l.boards[s] - l.mean : l.boards[s]);
+  const vs = L.flatMap(l => seeds.map(s => val(l, s))).filter(v => v != null);
+  let color, lo, hi;
+  if (mode === 'dev') {
+    const m = Math.ceil(Math.max(...vs.map(Math.abs)));
+    lo = -m; hi = m;
+    color = v => v < 0 ? mix(css('--div-mid'), css('--div-neg'), Math.min(1, -v / m)) : mix(css('--div-mid'), css('--div-pos'), Math.min(1, v / m));
+  } else {
+    lo = Math.floor(Math.min(...vs)); hi = Math.ceil(Math.max(...vs));
+    color = v => mix(css('--seq-lo'), css('--seq-hi'), (v - lo) / Math.max(1e-9, hi - lo));
+  }
+  $('heatSub').textContent = `${seeds.length} boards (rows, sorted by ${snapName(selLine)} like the chart above: weakest at top) × ${L.length} snapshots (columns, oldest left). ` +
+    (mode === 'dev' ? 'Red: weaker than that snapshot\'s mean; blue: stronger. A weak board that stays weak is a red row.' : 'Darker is a higher win rate.');
+  const dpr = window.devicePixelRatio || 1, padL = 8, padB = 22, rowH = Math.max(3, Math.min(10, Math.floor(600 / seeds.length)));
+  const Wcss = cv.parentElement.clientWidth, Hcss = rowH * seeds.length + padB;
+  cv.style.height = Hcss + 'px'; cv.width = Math.round(Wcss * dpr); cv.height = Math.round(Hcss * dpr);
+  const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, Wcss, Hcss);
+  const colW = (Wcss - padL) / L.length;
+  L.forEach((l, j) => seeds.forEach((s, i) => {
+    const v = val(l, s); if (v == null) return;
+    g.fillStyle = color(v); g.fillRect(padL + j * colW, i * rowH, Math.ceil(colW), rowH);
+  }));
+  const sel = L.indexOf(selLine);  // mark the selected snapshot's column
+  g.strokeStyle = C.ink; g.lineWidth = 1.5; g.strokeRect(padL + sel * colW, 0.75, colW, rowH * seeds.length - 1.5);
+  g.fillStyle = C.muted; g.font = '11px system-ui, sans-serif'; g.textBaseline = 'top';
+  const step = Math.max(1, Math.ceil(L.length / Math.max(2, Math.floor((Wcss - padL) / 80))));
+  for (let j = 0; j < L.length; j += step) { g.textAlign = j === 0 ? 'left' : 'center'; g.fillText(snapName(L[j]).replace('snap ', ''), padL + j * colW + (j === 0 ? 0 : colW / 2), rowH * seeds.length + 6); }
+  heat = {seeds, L, padL, rowH, colW, val, mode};
+  // scale legend
+  const lg = document.createElement('canvas'); lg.width = 160; lg.height = 10; const lc = lg.getContext('2d');
+  for (let x = 0; x < 160; x++) { lc.fillStyle = color(lo + (hi - lo) * x / 159); lc.fillRect(x, 0, 1, 10); }
+  const u = mode === 'dev' ? ' pp' : '%';
+  $('heatLegend').innerHTML = `<span>${lo}${u}</span>`; $('heatLegend').appendChild(lg);
+  $('heatLegend').insertAdjacentHTML('beforeend', `<span>${hi > 0 && mode === 'dev' ? '+' : ''}${hi}${u}</span><span class="muted">· columns are snapshot iterations; outlined column = selected snapshot</span>`);
+}
+$('heat').addEventListener('mousemove', e => {
+  const tip = $('tip');
+  if (!heat) { tip.style.display = 'none'; return; }
+  const r = e.target.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  const i = Math.floor(y / heat.rowH), j = Math.floor((x - heat.padL) / heat.colW);
+  if (i < 0 || i >= heat.seeds.length || j < 0 || j >= heat.L.length) { tip.style.display = 'none'; return; }
+  const l = heat.L[j], s = heat.seeds[i], v = l.boards[s];
+  tip.innerHTML = `board ${s} · ${snapName(l)}<br>` + (v == null ? 'no data' : `${v.toFixed(1)}% (panel mean ${l.mean.toFixed(1)}%, ${(v - l.mean >= 0 ? '+' : '') + (v - l.mean).toFixed(1)} pp)`);
+  tip.style.display = 'block'; tip.style.left = (e.clientX + 12) + 'px'; tip.style.top = (e.clientY + 12) + 'px';
+});
+$('heat').addEventListener('mouseleave', () => { $('tip').style.display = 'none'; });
+
+function drawTables(boards, A, B) {
+  const n = Math.min(10, boards.length);
+  const tbl = (title, rows) => {
+    let h = `<div><h3 style="font-size:13px;margin:0 0 4px">${title}</h3><table><tr><th>board</th><th><span class="sw" style="background:${C.run}"></span>${D.run} %</th>`;
+    if (A) h += `<th><span class="sw" style="background:${C.a}"></span>${A.label} %</th><th>Δ pp</th>`;
+    if (B && B !== A) h += `<th><span class="sw" style="background:${C.b}"></span>${B.label} %</th>`;
+    h += '<th>specialist vs base %</th><th>spec. iter</th><th>spec. outcome</th></tr>';
+    for (const [s, v] of rows) {
+      const a = A ? A.boards[s] : null, sp = spec(s);
+      h += `<tr><td>${s}</td><td>${v.toFixed(1)}</td>`;
+      if (A) h += `<td>${fmt(a)}</td><td>${a == null ? fmt(null) : (v - a >= 0 ? '+' : '') + (v - a).toFixed(1)}</td>`;
+      if (B && B !== A) h += `<td>${fmt(B.boards[s])}</td>`;
+      h += sp ? `<td>${fmt(sp.best_win == null ? null : 100 * sp.best_win)}</td><td>${sp.best_iter ?? fmt(null)}</td><td>${sp.outcome}</td></tr>`
+              : `<td>${fmt(null)}</td><td>${fmt(null)}</td><td>${fmt(null)}</td></tr>`;
+    }
+    return h + '</table></div>';
+  };
+  $('tables').innerHTML = tbl(`${n} weakest`, boards.slice(0, n)) + tbl(`${n} strongest`, boards.slice(-n).reverse());
+}
+
+async function load() {
+  try {
+    const runs = await getJSON('/api/runs');
+    const names = runs.map(r => r.name);
+    if (runName && !names.includes(runName)) names.unshift(runName);
+    $('run').innerHTML = (runName ? '' : '<option value="">pick a run</option>') + names.map(n => `<option ${n === runName ? 'selected' : ''}>${n}</option>`).join('');
+    if (!runName) { $('status').textContent = 'no run given: pick one above (or open /panel?run=NAME)'; return; }
+    D = await getJSON('/api/panel_boards?run=' + encodeURIComponent(runName));
+    document.title = `${D.run} Board Panel`;
+    $('title').textContent = `Per-board panel: ${D.run}`;
+    $('info').textContent = `runs/${D.panel_file}: ${D.lines.length} panel line${D.lines.length === 1 ? '' : 's'}` +
+      (D.panel_kind === 4 ? ' (old 4-board panel; the runs/panel100 baselines and sp3 specialists cover the 100-board panel, so they will not overlap)' : '') +
+      ` · ${D.baselines.length} baselines in runs/panel100/ · ${Object.keys(D.specialists).length} specialists in runs/sp3/results.jsonl`;
+    if (!D.lines.length) { $('status').innerHTML = `<span class="err">runs/${D.panel_file} has no well-formed panel lines</span>`; return; }
+    fillSelects(); draw();
+    $('status').textContent = 'loaded ' + new Date().toLocaleTimeString();
+  } catch (e) { $('status').innerHTML = `<span class="err">error: ${e.message}</span>`; }
+}
+
+$('run').addEventListener('change', e => { if (e.target.value) location.search = '?run=' + encodeURIComponent(e.target.value); });
+for (const id of ['snap', 'baseA', 'baseB']) $(id).addEventListener('change', draw);
+$('heatMode').addEventListener('change', () => { const line = D.lines[+$('snap').value]; drawHeat(Object.entries(line.boards).sort((p, q) => p[1] - q[1]).map(([s]) => s), line); });
+window.addEventListener('resize', () => { if (D && D.lines.length) draw(); });
+load();
+</script>
+</body>
+</html>

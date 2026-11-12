@@ -1,5 +1,5 @@
 {
- "updated": "2026-11-10T23:26:00-05:00",
+ "updated": "2026-11-11T10:25:00-05:00",
  "rules": {
   "goal": "self-play throughput (games/s and sims/s per core) in the Rust engine; actors are 64-core Zen 4/5 spot instances (znver4), the dev box a 16-thread Zen 2",
   "acceptance": "keep a change only if it gains >= 3% on the benchmark (400/50 sims, 4 threads, fixed seed, python/openhex_models/ham.ctnn) with all cargo tests green; numerics bit-identical, or flagged and shown neutral by self-play (same net vs itself 50 +/- 1 over 4k games)",
@@ -41,12 +41,28 @@
      "when": "2026-11-10T23:25",
      "what": "second-net scenario, breeze.ctnn (obs 2202, 8 tensors), 8 games x 4 threads, base vs new back-to-back, 2 rounds: [cycles:u G, wall s, sims/s/thread]; checksum 246.0024 identical; games were not longer than ham's (6895 vs 6883 decisions)",
      "base": [
-      [89.6, 6.88, 31362],
-      [93.06, 7.25, 29791]
+      [
+       89.6,
+       6.88,
+       31362
+      ],
+      [
+       93.06,
+       7.25,
+       29791
+      ]
      ],
      "new": [
-      [78.58, 6.15, 35122],
-      [83.12, 6.38, 33839]
+      [
+       78.58,
+       6.15,
+       35122
+      ],
+      [
+       83.12,
+       6.38,
+       33839
+      ]
      ]
     }
    ],
@@ -55,24 +71,157 @@
   {
    "id": "incremental-encoding",
    "title": "Incremental / cached observation encoding per node",
-   "lane": "ready",
+   "lane": "done",
    "priority": 1,
    "kind": "optimisation",
    "hypothesis": "Each expanded node re-encodes the full ~2200-input observation (encode + evaluate ~11% of a simulation). Caching the parent's encoding and patching the few changed fields, or encoding only the sparse diff, removes most of that.",
    "indicator": "benchmark delta; sparse_observation_matches_dense stays green",
    "cost": "half a day",
-   "runs": []
+   "runs": [],
+   "started": "2026-11-10T23:32",
+   "verdict": "win",
+   "finished": "2026-11-10T23:50",
+   "result": "Kept (bit-identical, checksum 366.6948 unchanged), as a bundle with the new simd-pack-compact card. Per-node incremental patching was not done: the observation is seat-relative (the mover flips every other node) and the costly parts are derived board quantities, so those are cached instead: (1) spots-block pips from a per-map table indexed by robber tile x node (ObservationSpace::spot_pips, built once per space with the same node_pips arithmetic; for_network no longer builds 128 spaces to find the layout: layout_size), (2) road_distances for all seats cached per board in encoding::EncodeCache (key = road owners + buildings + cap + map topology, hashed, verified by compare; 8 entries round robin; mcts::Evaluator holds one and uses encode_sparse_cached everywhere), (3) the two OpenHex dice probability vectors share one deck pass (DiceDeck::probabilities_pair). Alone (3 rounds, 8 games x 4 threads): instructions 235.0G -> 229.6G (-2.3%), cycles -1.4% in the clean round (others lost to box noise), so below the 3% bar by itself; perf: road_distances 2.0% -> <0.3%, add_production 1.8% -> 0, DiceDeck::probabilities 1.2% -> base_weights 0.76%, encoding write<Sparse> 7.45% -> 7.3% (the remaining cost is the ~2200 feature puts themselves, ~5 cycles each; skipping unseated seats (encode-skip-empty-seats) would save ~80 branch-free puts, ~0.1%, so that card is not worth doing). New test cached_sparse_encoding_matches_plain (exact equality across games, maps, observers, all blocks).",
+   "measurements": [
+    {
+     "what": "selfplay_bench 8g x 4t, base vs encoder-only, [cycles:u G, instructions G, wall s] per round",
+     "base": [
+      [
+       154.81,
+       235.0,
+       18.77
+      ],
+      [
+       146.18,
+       235.0,
+       10.82
+      ],
+      [
+       119.96,
+       235.0,
+       8.62
+      ]
+     ],
+     "new": [
+      [
+       149.57,
+       229.61,
+       10.95
+      ],
+      [
+       116.49,
+       229.61,
+       8.43
+      ],
+      [
+       118.24,
+       229.61,
+       8.53
+      ]
+     ],
+     "checksum": "366.6948 both"
+    }
+   ]
   },
   {
    "id": "alloc-free-expansion",
    "title": "Allocation-free node expansion and simulation reuse",
-   "lane": "ready",
+   "lane": "done",
    "priority": 2,
    "kind": "optimisation",
    "hypothesis": "Per-child Vec allocations, per-simulation temporaries and Game copies at chance nodes (execute_with_luck copies the game per outcome) cost malloc time (~2%) and cache misses; arena/bump allocation per search and reused buffers remove them.",
    "indicator": "benchmark delta; alloc_profile example",
    "cost": "half a day",
-   "runs": []
+   "runs": [],
+   "started": "2026-11-10T23:50",
+   "verdict": "win",
+   "finished": "2026-11-11T00:05",
+   "result": "Kept (bit-identical; checksum 366.6948 at 8 games, 1206.6847 at 32 games, both unchanged). Allocations per simulation 22 -> 8 (alloc_profile, now with sampled allocation backtraces: `alloc_profile <model> <games> trace`). Removed: the per-child clone of playable_actions in Game::copy_without_history (new Game::copy_for_step: state copy only, the actions are regenerated by execute_unchecked; used by MctsPlayer::child, the shared and lock-free searches and immediate_win), the ids/results Vecs per simulation in MctsPlayer::search (the plain k=1 search now runs simulate() directly, with the root noise; the batched path is unchanged), the priors Vec per evaluation (Evaluator::evaluate returns a view of a reused buffer, softmax in place; expand_with -> expand_node taking a slice), the vec![1.0] per forced-move expansion, the three Vecs per observation in the spots/reach blocks, the Vec in DiceDeck::draw (k-th matching card by scan, same rng call), yield_resources (PerSeat), and yop_options() rebuilt on every ActionSpace::encode of a Year of Plenty (const table). Remaining per simulation: the child's Vec<Action> and the node's Vec<Edge> (pooling them would save ~2 malloc/free pairs, ~0.2%: not worth it). Alone vs the previous bundle binary: instructions 221.45G -> 218.00G (-1.6%); cycles not separable from the box noise. Whole bundle (encoder caches + pack compaction + this), final confirmation 32 games x 4 threads, 2 rounds back to back vs the HEAD baseline: cycles:u 499.5G -> 436.8G (-12.6%) and wall 33.0 -> 28.6 s in the clean round (round 1: 510.5G/42.4 s -> 515.5G/35.8 s under a contention spike), instructions 942.8G -> 874.2G (-7.3%), sims/s/thread 27.3k -> 31.6k. Not done: Game copies in execute_with_luck (per real random event, ~0.1% of the work).",
+   "measurements": [
+    {
+     "what": "selfplay_bench 8g x 4t, base vs full bundle, [cycles:u G, instructions G, wall s, sims/s/thread] per round",
+     "base": [
+      [
+       123.33,
+       235.0,
+       8.87,
+       25411
+      ],
+      [
+       163.12,
+       235.0,
+       22.87,
+       9856
+      ],
+      [
+       119.4,
+       235.0,
+       8.57,
+       26313
+      ]
+     ],
+     "new": [
+      [
+       134.83,
+       218.0,
+       10.72,
+       21021
+      ],
+      [
+       132.09,
+       217.99,
+       10.06,
+       22401
+      ],
+      [
+       111.51,
+       218.0,
+       7.84,
+       28760
+      ]
+     ],
+     "checksum": "366.6948 both"
+    },
+    {
+     "what": "final confirmation: selfplay_bench 32g x 4t seed 99, base vs full bundle, [cycles:u G, instructions G, wall s, sims/s/thread] per round",
+     "base": [
+      [
+       510.48,
+       942.78,
+       42.37,
+       21307
+      ],
+      [
+       499.54,
+       942.79,
+       33.03,
+       27335
+      ]
+     ],
+     "new": [
+      [
+       515.46,
+       874.19,
+       35.79,
+       25231
+      ],
+      [
+       436.82,
+       874.19,
+       28.58,
+       31591
+      ]
+     ],
+     "checksum": "1206.6847 both"
+    },
+    {
+     "what": "alloc_profile, 1 game single-threaded, allocations per example",
+     "before": 18531,
+     "after": 6470,
+     "per_simulation_before": 22,
+     "per_simulation_after": 8
+    }
+   ]
   },
   {
    "id": "first-layer-f16",
@@ -200,13 +349,54 @@
   {
    "id": "cross-game-batching",
    "title": "Lockstep batching of leaf evaluations across K independent games per thread",
-   "lane": "ready",
+   "lane": "done",
    "priority": 1,
    "kind": "optimisation",
    "hypothesis": "forward_batch is 1.7x cheaper per position at K=4 (f16 conversion shared across positions) and cross-game batching needs no virtual loss, so every game's trajectory stays identical; the forward pass is ~72% of a simulation, so ~1.4x overall. Needs the search and the self-play loop to be resumable (state machine) or K game threads per core with a rendezvous evaluator (context-switch overhead).",
    "indicator": "benchmark delta; selfplay checksum unchanged",
    "cost": "1-2 days",
-   "runs": []
+   "runs": [],
+   "verdict": "null",
+   "started": "2026-11-10T23:30",
+   "finished": "2026-11-10T23:32",
+   "result": "Rejected by measurement before implementing the resumable search: the 1.7x per-position gain of forward_batch at K=4 holds for consecutive positions of one game (nn_speed: 27.5 -> 17.5 us, 1.57x today), not for positions from different games. New nn_speed mode `cross` (examples/nn_speed.rs, 9 interleaved rounds, medians, 8 F-bot games at the same decision index): different boards batch 4 = 1.08x, batch 8 = 0.99x (first-layer input union 0.44 / 0.26 of the summed inputs); same board (different dice/seats) batch 4 = 1.31x, batch 8 = 1.29x (union 0.30 / 0.15). The forward is ~64% of a simulation (perf, HEAD), so lockstep over K independent games on different boards caps at ~5% before the executor/state-machine overhead and K trees per core, under the 3% bar; on an idle actor core (FP-pipe-bound rather than memory-bound) the batch kernel loses outright on low-overlap positions (per union row V cvt + S splat + V*S FMA vs 8 cvt + 8 FMA per position row). Not implemented. Next step if revisited: lockstep the same-board replays of one game (opening/endgame branches and the placement fork, ~70% of the work, kernel ceiling 1.31x at K=4 -> ~10-12% before overhead) with per-branch rng streams behind a flag (changes trajectories, needs the 4k-game neutrality check) and an async (coroutine) self-play loop so the search is resumable; the main game cannot join (it must finish first).",
+   "measurements": [
+    {
+     "what": "nn_speed cross mode, ham.ctnn, us per position (median of 9 interleaved rounds), single = forward_sparse_for",
+     "different_boards": {
+      "single": 24.7,
+      "batch4": 22.9,
+      "batch8": 25.1,
+      "union_ratio_4": 0.44,
+      "union_ratio_8": 0.26
+     },
+     "same_board": {
+      "single": 24.2,
+      "batch4": 18.5,
+      "batch8": 18.8,
+      "union_ratio_4": 0.3,
+      "union_ratio_8": 0.15
+     },
+     "same_game_consecutive": {
+      "single": 27.5,
+      "batch4": 17.5,
+      "batch8": 18.9
+     }
+    },
+    {
+     "what": "perf profile of selfplay_bench at HEAD (8 games x 4 threads, cycles:u self)",
+     "Layer::forward": 63.8,
+     "encoding_write_sparse": 7.45,
+     "compact_positive": 6.4,
+     "descend_from": 2.75,
+     "Evaluator::evaluate": 2.25,
+     "road_distances": 2.0,
+     "add_production": 1.8,
+     "forward_batch_luck": 1.5,
+     "DiceDeck::probabilities": 1.2,
+     "malloc_free_memmove": 2.8
+    }
+   ]
   },
   {
    "id": "static-fold-first-layer",
@@ -269,28 +459,154 @@
     {
      "what": "selfplay_bench 8g x 4t, base vs new (prefetch + simd-compact + legal-only policy), [cycles:u G, wall s] per round",
      "base": [
-      [130.71, 9.29],
-      [134.96, 10.04],
-      [141.31, 11.39]
+      [
+       130.71,
+       9.29
+      ],
+      [
+       134.96,
+       10.04
+      ],
+      [
+       141.31,
+       11.39
+      ]
      ],
      "new": [
-      [121.06, 8.58],
-      [125.61, 8.98],
-      [144.99, 15.45]
+      [
+       121.06,
+       8.58
+      ],
+      [
+       125.61,
+       8.98
+      ],
+      [
+       144.99,
+       15.45
+      ]
      ]
+    },
+    {
+     "when": "2026-11-10T23:40",
+     "where": "rr2 actors (CloudWatch shard logs), 256-game shards, 400/50 sims",
+     "before": "c8a.16xlarge (Zen 5): 20.8 and 21.0 s/shard (two actors, 22:25-23:20)",
+     "after": "same c8a instance: 19.9 s/shard (23:20-23:40), -4.5%; a c7a.16xlarge (Zen 4) that joined rr2 in the roll: 27.9 s/shard",
+     "note": "rr2's games/hour drop after the roll (~88k -> ~76k) is the c7a moving from the sp3 arm to rr2, not the image; Zen 5 c8a is ~35% faster than Zen 4 c7a at equal vCPU"
     }
-   ]
+   ],
+   "notes": "Deployed: the three kept changes (commit 86d6bf5) are in the actor image pushed 23:18 Nov 10 (digest 4a2cee7a281a); all four actors rolled onto it at 23:20 (two rr2, two sp3). The local extension in python/.venv is still the old build; rebuild it between arms (maturin develop --release --uv)."
   },
   {
    "id": "avx512-tile",
    "title": "Wider register tiles on the znver4 actors (AVX-512: 32 registers, 16-lane f16 conversion)",
-   "lane": "ready",
+   "lane": "done",
    "priority": 2,
    "kind": "optimisation",
    "hypothesis": "On Zen 4 the kernel could use ymm16-31 (TILE 16-24 accumulators) or zmm (half the instructions per row-tile), cutting front-end and loop overhead; the dev box (Zen 2, AVX2) cannot measure it, so it needs a cfg(target_feature = \"avx512f\") path benchmarked on an actor.",
    "indicator": "nn_speed on an actor; bit-identical (same FMA order)",
    "cost": "3 h + an actor",
-   "runs": []
+   "runs": [],
+   "started": "2026-11-10T23:59",
+   "verdict": "unmeasured",
+   "finished": "2026-11-11T00:05",
+   "result": "Implemented, compiles under both feature sets, UNMEASURED (the dev box is Zen 2: the zmm path cannot run here, not even under qemu). nn.rs: module simd512 (16-lane F16: load/store/splat/fma/load_f16 = vcvtph2ps ymm->zmm) and Layer::tile_z, used by Layer::forward for every full 64-output block when cfg(target_feature = \"avx512f\") (on with -C target-cpu=znver4, i.e. the actor image and target-cpu=native on a Zen 4/5), otherwise tile::<8> as before: the AVX2 path is untouched and bit-identical (checksums above). tile_z keeps the block layout and the per-lane FMA order (4 accumulators, 4 conversions + 4 FMAs per weight row instead of 8 + 8, same PF_MODE 2 prefetch), so its outputs should be bit-identical to the ymm kernel; the batch, policy-subset and compaction kernels stay on ymm. Verified only that `RUSTFLAGS=\"-C target-cpu=znver4\" cargo build --release --target x86_64-unknown-linux-gnu --example selfplay_bench` (separate target dir; the --target keeps build scripts native) compiles and emits the expected loop (vcvtph2ps {sae} ymm,zmm + vfmadd213ps zmm x4, unrolled 2x by LLVM); `cargo check --all-targets` clean. Expected gain is modest: Zen 4 double-pumps 512-bit ops, so FP-pipe time is unchanged and only front-end/loop overhead halves (the kernel was near the FP bound on Zen 2). To measure on an actor (Zen 4): (1) correctness: `cargo test --release` there (batched_forward_matches_single and subset_policy_matches_full compare the zmm single path with the ymm batch/subset kernels exactly) and `python bench.py` parity vs bench/parity.npz (x86 AVX2 reference); (2) speed: `cargo run --release --example nn_speed -- bench/model.ctnn single` and selfplay_bench under perf stat, against the same build with `RUSTFLAGS=\"-C target-cpu=znver4 -C target-feature=-avx512f\"` (zmm path compiled out), interleaved rounds. Follow-ups if it pays: a two-block tile (8 zmm accumulators, 128 outputs per pass over nz, two row streams) and a zmm batch_tile.",
+   "measurements": [
+    {
+     "what": "znver4 build check on the dev box",
+     "compiles": true,
+     "zmm_instructions_in_selfplay_bench": 3174,
+     "runs": "not runnable here (no AVX-512)"
+    }
+   ]
+  },
+  {
+   "id": "simd-pack-compact",
+   "title": "Branch-free ReLU compaction: table-driven left-pack of 8 lanes (AVX2 permutevar8x32 + unpack)",
+   "kind": "optimisation",
+   "priority": null,
+   "lane": "done",
+   "verdict": "win",
+   "started": "2026-11-10T23:40",
+   "finished": "2026-11-10T23:50",
+   "hypothesis": "compact_positive (simd-compact) was still 6.4-6.8% of a simulation: its per-set-bit loop has a loop-carried chain and an unpredictable exit per vector (~150 survivors of 512, 4 passes per eval). A 256-entry table of lane permutations left-packs each vector in a fixed ~14 instructions with no branch: compare, movemask, table load, permutevar8x32 for the values, add for the indices, two unpacks and two 128-bit permutes to interleave (index, value) pairs, two stores (8 pairs always written; nz kept LANES longer), popcnt. Same entries in the same order: bit-identical.",
+   "indicator": "compact_positive share; checksum",
+   "cost": "1 h",
+   "runs": [],
+   "result": "Kept. Bundle encoder caches + this, 3 rounds back to back vs the HEAD baseline binary (8 games x 4 threads, seed 99): cycles:u 122.36G -> 109.16G (-10.8%) and 122.90G -> 111.18G (-9.5%) in the two clean rounds (first round base hit by a contention spike: 143.8G -> 111.4G), instructions 235.00G -> 221.45G (-5.8%), wall 8.6-8.9 s -> 7.9 s, sims/s/thread 25.4-26.2k -> 28.6-28.7k; checksum 366.6948 unchanged. Attribution by difference from the encoder-only A/B: this change is about -3.5% instructions and -8% cycles (the mispredicts were the cost, not the instructions). aarch64 keeps the bit-iteration loop (same pairs). Unit test compact_positive_matches_scalar (all 256 lane masks, tails, zeros vs negatives); batched_forward_matches_single cross-checks it against gather_relu.",
+   "measurements": [
+    {
+     "what": "selfplay_bench 8g x 4t, base vs encoder caches + pack compaction, [cycles:u G, instructions G, wall s, sims/s/thread] per round",
+     "base": [
+      [
+       143.78,
+       235.0,
+       11.98,
+       18812
+      ],
+      [
+       122.36,
+       235.0,
+       8.61,
+       26175
+      ],
+      [
+       122.9,
+       235.0,
+       8.86,
+       25438
+      ]
+     ],
+     "new": [
+      [
+       111.43,
+       221.45,
+       8.11,
+       27799
+      ],
+      [
+       109.16,
+       221.45,
+       7.86,
+       28677
+      ],
+      [
+       111.18,
+       221.45,
+       7.87,
+       28636
+      ]
+     ],
+     "checksum": "366.6948 both"
+    }
+   ]
+  },
+  {
+   "id": "fleet-keeper",
+   "title": "Price-per-game spot fleet keeper (runs/fleet.py) replaces the Auto Scaling group",
+   "lane": "running",
+   "priority": 1,
+   "kind": "infra",
+   "hypothesis": "The ASG picks pools per instance at launch and never re-prices, so a 192-core m8a metal at $1.18/h (half the per-core price of a c8a.16xlarge) is never chosen and boxes drift onto expensive pools. Actors are stateless (a shard every ~20 s), so chasing $/game across (type, AZ) pools with cheap migration is viable.",
+   "result": "Switched 00:07 Nov 11: old keeper stopped, group set to 0/0/0, fleet.py launched. Dry run before the switch: aim m8a.metal-48xl@1d $1.18/h ($0.85/100k games) + c8a.16xlarge@1f $0.75/h ($1.62/100k) = ~$1.93/h for ~185k games/h vs $4.26/h for 172k on the group. Rules: cheapest eligible pool per arm within the 256-vCPU quota, 3 capacity failures -> 30 min cooldown -> next pool, migrate when >20% dearer than the best pool for 15 min (one per 30 min), idle 5 min -> terminate, 14 h safety deadline. Metal per-core throughput assumed = c8a.16xlarge (unmeasured).",
+   "runs": [],
+   "measurements": [
+    {
+     "when": "2026-11-11T07:50",
+     "where": "on1 actors, CloudWatch shard logs",
+     "m8a.48xlarge": "23.6 s per 768-game shard = 117k games/h = 611/h/core at $3.09/h = $2.63/100k",
+     "c8a.16xlarge": "18.0 s per 256-game shard = 51k games/h = 802/h/core at $0.96/h = $1.87/100k",
+     "note": "192-core box is 24% slower per core (one process, 192 threads); linear scaling assumption corrected in fleet.json; keeper flaw fixed the same morning: an arm's share now survives 20 min without its learner (a crash had torn the fleet down)"
+    },
+    {
+     "when": "2026-11-11T09:40",
+     "where": "on2 actors, CloudWatch shard logs",
+     "c8g.16xlarge (Graviton 4)": "60 s per 256-game shard = 15.4k games/h at $0.71-0.93/h = $4.7-6 per 100k games",
+     "note": "3.3x slower per vCPU than c8a.16xlarge; the SIMD kernels are AVX2 paths, aarch64 falls back to scalar loops. Keeper table corrected; a NEON port of the f16 tile/pack kernels would be needed before Graviton is worth using"
+    }
+   ],
+   "started": "2026-11-11T00:07",
+   "notes": "A `cdk deploy` of the stack restores the group's max size to 4: set it back to 0 afterwards (runs/fleet_switch.sh does). Config runs/fleet.json (arms + shares, throughput table, caps); state runs/fleet_state.json; log runs/fleet.out. | Nov 11 10:25: Graviton detour (08:45-10:21) fixed; keeper changes: quota refusals (MaxSpotInstanceCountExceeded etc.) are not pool failures; a box over the $/game cap is replaced terminate-first toward any quiet eligible pool; arms keep their share 20 min after their learner vanishes. Observed: AWS refuses new spot launches for ~2-5 min after a termination even with vCPUs free under the quota."
   }
  ]
 }

@@ -80,6 +80,42 @@ mod simd {
     pub unsafe fn prefetch(p: *const u16) {
         _mm_prefetch::<_MM_HINT_T0>(p as *const i8)
     }
+    /// For each 8-bit mask, the set bits' positions in order (then zeros).
+    const PACK: [[u8; 8]; 256] = {
+        let mut t = [[0u8; 8]; 256];
+        let mut m = 0;
+        while m < 256 {
+            let (mut k, mut lane) = (0, 0);
+            while lane < 8 {
+                if m >> lane & 1 == 1 {
+                    t[m][k] = lane as u8;
+                    k += 1;
+                }
+                lane += 1;
+            }
+            m += 1;
+        }
+        t
+    };
+    /// Writes the lanes of `v` that are > 0 to `dst`, in lane order, as
+    /// (`base` + lane, value) pairs, and returns how many. Branch-free:
+    /// the lanes are left-packed by a table lookup and eight pairs are
+    /// stored every time (those past the count are junk), so `dst` must
+    /// have room for eight.
+    #[inline(always)]
+    pub unsafe fn pack_positive(v: F8, base: u32, dst: *mut (u32, f32)) -> usize {
+        let m = _mm256_movemask_ps(_mm256_cmp_ps::<_CMP_GT_OQ>(v.0, _mm256_setzero_ps())) as usize;
+        let perm = _mm256_cvtepu8_epi32(_mm_loadl_epi64(PACK[m].as_ptr() as *const __m128i));
+        let vals = _mm256_castps_si256(_mm256_permutevar8x32_ps(v.0, perm));
+        let idx = _mm256_add_epi32(perm, _mm256_set1_epi32(base as i32));
+        // Pairs (index, value) interleaved within each 128-bit half, then
+        // the halves put in lane order.
+        let lo = _mm256_unpacklo_epi32(idx, vals);
+        let hi = _mm256_unpackhi_epi32(idx, vals);
+        _mm256_storeu_si256(dst as *mut __m256i, _mm256_permute2x128_si256::<0x20>(lo, hi));
+        _mm256_storeu_si256((dst as *mut __m256i).add(1), _mm256_permute2x128_si256::<0x31>(lo, hi));
+        m.count_ones() as usize
+    }
 }
 
 /// Eight f32 lanes and the operations the forward pass needs.
@@ -154,6 +190,63 @@ mod simd {
     #[inline(always)]
     pub unsafe fn prefetch(p: *const u16) {
         asm!("prfm pldl1keep, [{p}]", p = in(reg) p, options(nostack, readonly, preserves_flags));
+    }
+    /// Writes the lanes of `v` that are > 0 to `dst`, in lane order, as
+    /// (`base` + lane, value) pairs, and returns how many (at most eight
+    /// pairs are written). Same pairs as the x86_64 version.
+    #[inline(always)]
+    pub unsafe fn pack_positive(v: F8, base: u32, dst: *mut (u32, f32)) -> usize {
+        let mut lanes = [0f32; 8];
+        store(lanes.as_mut_ptr(), v);
+        let mut m = positive_mask(v);
+        let mut n = 0;
+        while m != 0 {
+            let k = m.trailing_zeros() as usize;
+            *dst.add(n) = (base + k as u32, lanes[k]);
+            n += 1;
+            m &= m - 1;
+        }
+        n
+    }
+}
+
+/// Sixteen f32 lanes (AVX-512) for `Layer::tile_z`: a 64-output block in 4
+/// registers instead of 8, half the conversion and FMA instructions per
+/// weight row. Each output lane still accumulates its own terms in `nz`
+/// order with one rounding each, as in `simd`, so the results are
+/// bit-identical to the 8-lane kernel. Compiled only with
+/// `-C target-cpu=znver4` (or any CPU with avx512f); not measurable on the
+/// AVX2 development machines.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+mod simd512 {
+    use std::arch::x86_64::*;
+
+    #[derive(Clone, Copy)]
+    pub struct F16(__m512);
+
+    pub const LANES: usize = 16;
+
+    #[inline(always)]
+    pub unsafe fn load(p: *const f32) -> F16 {
+        F16(_mm512_loadu_ps(p))
+    }
+    #[inline(always)]
+    pub unsafe fn store(p: *mut f32, v: F16) {
+        _mm512_storeu_ps(p, v.0)
+    }
+    #[inline(always)]
+    pub unsafe fn splat(x: f32) -> F16 {
+        F16(_mm512_set1_ps(x))
+    }
+    /// acc + x * w, one rounding.
+    #[inline(always)]
+    pub unsafe fn fma(acc: F16, x: F16, w: F16) -> F16 {
+        F16(_mm512_fmadd_ps(x.0, w.0, acc.0))
+    }
+    /// Sixteen f16 values (bits) as f32 (exact).
+    #[inline(always)]
+    pub unsafe fn load_f16(p: *const u16) -> F16 {
+        F16(_mm512_cvtph_ps(_mm256_loadu_si256(p as *const __m256i)))
     }
 }
 
@@ -267,6 +360,9 @@ impl Layer {
         for t in 0..self.blocks() {
             let w_t = (self.stride - t * self.block_w).min(self.block_w);
             match w_t / LANES {
+                #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+                8 => self.tile_z(nz, t, out),
+                #[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
                 8 => self.tile::<8>(nz, t, out),
                 7 => self.tile::<7>(nz, t, out),
                 6 => self.tile::<6>(nz, t, out),
@@ -340,6 +436,52 @@ impl Layer {
             }
             for (k, a) in acc.iter().enumerate() {
                 simd::store(out.as_mut_ptr().add(j + k * LANES), *a);
+            }
+        }
+    }
+
+    /// `tile::<8>` (a full BLOCK-wide block) on 16-lane AVX-512 vectors:
+    /// four accumulators, four conversions and four FMAs per weight row.
+    /// Same prefetching (`PF_MODE` 2 only; mode 1 is not used) and the same
+    /// per-lane arithmetic, so the outputs are bit-identical to `tile`.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    #[inline(always)]
+    fn tile_z(&self, nz: &[(u32, f32)], t: usize, out: &mut [f32]) {
+        const V: usize = BLOCK / simd512::LANES;
+        let j = t * self.block_w;
+        assert!(j + BLOCK <= self.stride && out.len() == self.stride);
+        let (base, w_t) = self.block(t);
+        assert!(w_t == BLOCK);
+        // SAFETY: every row index is < inputs (asserted in `forward`) and
+        // the block is BLOCK wide (asserted above), so all loads/stores
+        // stay inside their buffers; prefetches read nothing.
+        unsafe {
+            let mut acc = [simd512::splat(0.0); V];
+            for (k, a) in acc.iter_mut().enumerate() {
+                *a = simd512::load(self.bias.as_ptr().add(j + k * simd512::LANES));
+            }
+            let mut step = |(i, xi): (u32, f32), ahead: Option<*const u16>| {
+                if let Some(p) = ahead {
+                    simd::prefetch(p);
+                    simd::prefetch(p.add(32));
+                }
+                let xv = simd512::splat(xi);
+                let row = base.add(i as usize * BLOCK);
+                for (k, a) in acc.iter_mut().enumerate() {
+                    *a = simd512::fma(*a, xv, simd512::load_f16(row.add(k * simd512::LANES)));
+                }
+            };
+            let n = nz.len();
+            let main = if PF_MODE == 2 { n.saturating_sub(PREFETCH) } else { 0 };
+            for k in 0..main {
+                let ahead = base.add(nz.get_unchecked(k + PREFETCH).0 as usize * BLOCK);
+                step(*nz.get_unchecked(k), Some(ahead));
+            }
+            for &e in &nz[main..] {
+                step(e, None);
+            }
+            for (k, a) in acc.iter().enumerate() {
+                simd512::store(out.as_mut_ptr().add(j + k * simd512::LANES), *a);
             }
         }
     }
@@ -452,25 +594,23 @@ fn compact(x: &[f32], nz: &mut Vec<(u32, f32)>, keep: impl Fn(f32) -> bool) -> u
     n
 }
 
-/// `compact` with `keep` = x > 0 (the ReLU's survivors): eight lanes are
-/// compared at once and only the set bits of the mask are visited, so the
-/// cost follows the active entries (a third or less) rather than the width.
+/// `compact` with `keep` = x > 0 (the ReLU's survivors): eight lanes at a
+/// time, left-packed without branches (`simd::pack_positive`), so the cost
+/// is a fixed few instructions per vector whatever the (unpredictable)
+/// number of survivors. `nz` is kept `LANES` entries longer than `x` for
+/// the junk pairs the last store writes past the count.
 fn compact_positive(x: &[f32], nz: &mut Vec<(u32, f32)>) -> usize {
-    if nz.len() < x.len() {
-        nz.resize(x.len(), (0, 0.0));
+    if nz.len() < x.len() + LANES {
+        nz.resize(x.len() + LANES, (0, 0.0));
     }
     let mut n = 0;
     let mut i = 0;
-    // SAFETY: `i + LANES <= x.len()` for every vector load.
+    // SAFETY: `i + LANES <= x.len()` for every vector load; `n <= i` and
+    // `nz` holds `x.len() + LANES` entries, so the eight pairs stored at
+    // `n` stay inside it.
     unsafe {
         while i + LANES <= x.len() {
-            let mut m = simd::positive_mask(simd::load(x.as_ptr().add(i)));
-            while m != 0 {
-                let k = i + m.trailing_zeros() as usize;
-                *nz.get_unchecked_mut(n) = (k as u32, *x.get_unchecked(k));
-                n += 1;
-                m &= m - 1;
-            }
+            n += simd::pack_positive(simd::load(x.as_ptr().add(i)), i as u32, nz.as_mut_ptr().add(n));
             i += LANES;
         }
     }
@@ -991,6 +1131,47 @@ impl PolicyValueNet {
                     *o = if s == u32::MAX { f32::NEG_INFINITY } else { lanes[k] };
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The branch-free ReLU compaction lists exactly the positive entries,
+    /// in order, for every pattern of eight lanes and for lengths with a
+    /// scalar tail; the entries past the count are never read.
+    #[test]
+    fn compact_positive_matches_scalar() {
+        let mut nz = Vec::new();
+        let mut seed = 12345u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32 / (1u64 << 31) as f32 - 0.5) * 4.0
+        };
+        for len in [0usize, 1, 7, 8, 9, 16, 23, 512, 517] {
+            for round in 0..64 {
+                let mut x: Vec<f32> = (0..len).map(|_| next()).collect();
+                // One vector per round takes the round's mask exactly, with
+                // zeros among the negatives (zero is not positive).
+                if len >= 8 {
+                    for lane in 0..8 {
+                        x[lane] = if round >> lane & 1 == 1 { 1.0 + lane as f32 } else if lane % 2 == 0 { 0.0 } else { -1.0 };
+                    }
+                }
+                let n = compact_positive(&x, &mut nz);
+                let expected: Vec<(u32, f32)> = x.iter().enumerate().filter(|(_, &v)| v > 0.0).map(|(i, &v)| (i as u32, v)).collect();
+                assert_eq!(&nz[..n], &expected[..], "len {len} round {round}");
+            }
+        }
+        // Every 8-bit mask as the lane pattern.
+        for m in 0..256u32 {
+            let x: Vec<f32> = (0..8).map(|lane| if m >> lane & 1 == 1 { lane as f32 + 0.5 } else { -(lane as f32) }).collect();
+            let n = compact_positive(&x, &mut nz);
+            assert_eq!(n, m.count_ones() as usize);
+            let expected: Vec<(u32, f32)> = (0..8u32).filter(|&l| m >> l & 1 == 1).map(|l| (l, l as f32 + 0.5)).collect();
+            assert_eq!(&nz[..n], &expected[..], "mask {m:#x}");
         }
     }
 }

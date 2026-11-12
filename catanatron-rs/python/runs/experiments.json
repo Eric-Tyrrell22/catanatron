@@ -1,5 +1,5 @@
 {
- "updated": "2026-11-10T23:15:00-05:00",
+ "updated": "2026-11-12T14:44:17-05:00",
  "rules": {
   "one_arm_at_a_time": "one training arm uses the fleet at a time; the recorded control curve (runs ac/kc/o4, flat at 51% vs Ham) is the baseline, no control arm",
   "checkpoints": "25k games: kill only if the learner is unhealthy. 50k: kill if panel flat AND the card's leading indicator flat AND Ham <= control. 100k: kill if Ham < control - 0.5 or panel flat; else run to 300k. 300k: promote (Pig match, ablation) if >= control + 1.5.",
@@ -23,7 +23,7 @@
   {
    "id": "opening-net",
    "title": "Separate opening network (initial placements only), evaluated on the board panel",
-   "lane": "ready",
+   "lane": "done",
    "priority": 2,
    "kind": "arm",
    "hypothesis": "The missing Elo is one board-conditioned decision (the first placement). A dedicated network used only for the 8 placement decisions can be large (8x1024 or a GNN) at no play-time cost and trained on placement positions alone with sibling-averaged outcome targets and 2,400-sim policies; the main 4x512 net keeps the rest. Pig uses two opening-only evaluators the same way. Both the fine-tuned specialist and the from-scratch oracle converge on node 19 on board 1010194, so the target is learnable from outcomes; the open question is generalisation to held-out boards (hp1 memorised a 50-board pool).",
@@ -32,9 +32,18 @@
    "extend": "panel >= 40",
    "cost": "~1 day of engine + learner plumbing (two-net evaluator keyed on is_initial_build_phase, key option, bindings, Mirror, actor image; an opening learner reading shard opening positions and publishing models/opening_<run>.ctnn); then one arm (2 actors, ~2 h per 125k games)",
    "depends_on": "rr2 result (if its reach features already move the panel, build the opening net on them)",
-   "runs": [],
-   "notes": "23:15 Nov 10: implemented on branch opening-net (worktree ../catanatron-opening). Engine: PolicyValueNet.opening + Evaluator picks the net by is_initial_build_phase; player keys take main.ctnn@opening.ctnn; self_play(opening_net=); actors read control['opening_model']; tests/opening_net.rs green. Learner: az.py --opening-net (--opening-hidden/-layers/-lr/-replay/-batch/-reuse/-min-replay): copy of the main net, trained on placement rows only (own replay/optimiser, omodel.pt/oreplay.pt), exported as osnap_N.ctnn beside each snap, published as models/<run>/opening_N.ctnn. score_runs.py/panel_score.py use snap@osnap when present; dashboard has an opening-loss chart. Smoke test running.",
-   "launch": "from the main python dir: PYTHONPATH=../../catanatron-opening/catanatron-rs/target/pylib .venv/bin/python ../../catanatron-opening/catanatron-rs/python/az.py --run on1 <rr2 COMMON minus reach flags> --opening-net --opening-lr 2e-4 --opening-share 0 (main net no longer plays placements); needs the actor image rebuilt from the branch"
+   "runs": [
+    "on1"
+   ],
+   "notes": "23:15 Nov 10: implemented on branch opening-net (worktree ../catanatron-opening). Engine: PolicyValueNet.opening + Evaluator picks the net by is_initial_build_phase; player keys take main.ctnn@opening.ctnn; self_play(opening_net=); actors read control['opening_model']; tests/opening_net.rs green. Learner: az.py --opening-net (--opening-hidden/-layers/-lr/-replay/-batch/-reuse/-min-replay): copy of the main net, trained on placement rows only (own replay/optimiser, omodel.pt/oreplay.pt), exported as osnap_N.ctnn beside each snap, published as models/<run>/opening_N.ctnn. score_runs.py/panel_score.py use snap@osnap when present; dashboard has an opening-loss chart. Smoke test running. | 00:52 launched on1: rr2's bundle minus the reach block, --opening-net 4x512 copy of o3-187 at lr 2e-4, opening replay 100k, batch 512, reuse 8, trains after 5k placement rows; main net --opening-share 0. Scorers: score_runs/panel_score from the branch (snap@osnap). Kill rules per ledger: 50k nothing; 100k kill if panel <= 37 and Ham <= control; 300k promote if panel >= 38. | 01:54 100k: panel 34.2 (control 37.0; board 1012006 fell to 30-31% from 41-44% under rr2/control, the other three boards normal), Ham 49.9 vs control 51.7@104k / 50.6-50.8@90k, opening pi 0.506 (still elevated) v 0.207 (flat). The 100k rule says kill; left running overnight per the user's 'make it work' decision and the session's usage limit. Morning: diagnose 1012006 (which spot the opening net now picks vs the specialist), then on2 at a lower opening lr or a resume from snap_000150. | 07:05 (605k games): PROMOTE criteria met. Panel by range 35.9 (0-100k), 37.4, 37.0, 36.9, 39.2 (400-500k), 39.8 (500-700k; last readings 40-42), control 37.0-37.5; per board last 100k: 1010194 24.7, 1010752 45.2, 1011188 44.5, 1012006 44.8 (all three non-1010194 boards up 4-5 points). Ham 50.2 -> 53.1 (last 100k; latest 53.4; control best 52.5, ~51 at matched games). Opening value loss 0.207 -> 0.196, main value loss 0.144 -> 0.135, opening policy loss flat ~0.51. The 1012006 dip at 50-100k recovered by 400k. First arm to beat the control clearly. | 07:17 100-board panel (runs/panel100.txt, 1000 games/board, \u00b10.6): on1@602k 36.7, control ac@356k 34.7, Ham 33.7, o3-187 33.4. Endgame conversion probe (examples/endgame_conv.rs, first to 13 -> win, network-only vs the sp2 specialists): on1 78/88/86/92% vs specialists 97/91/94/90% on 1010194/1010752/1011188/1012006; o3-187 78/88/87/91%: unchanged after 600k games, and equal to the specialist where overall strength is at parity (1012006). | 07:30 hard boards dropped (user): the set churned 252/256 between publishes 2 min apart and had no layout signature vs random boards (single-observation outcome noise); on1 resumed with --hard-boards 0 so the 25% share goes to fresh boards. on_launch.sh/on1_launch.sh updated likewise. | 08:30 seat/first-pick probes (examples/seat_bias.rs, first_pick.rs): 1010194 favours the FIRST seat in equal self-play (on1 60%, o3 73%, specialist 72%; random boards 55%), but on1 first vs specialist 25.5% and specialist first vs on1 74.8%. First picks there: specialist node 19, on1's opening net still 13 as first seat (like Ham/o3) yet takes 19 as the SECOND seat (o3/main reply 11) -> it knows 19 is strong but hasn't moved its first-move policy; explains Pig: on1 second 76%, first 24%. 1011188: on1 picks node 6 (novel; o3 18, Ham 17); 1012006 and 1010752 unchanged first picks. | 08:35 Pig on 1010194 (MCTS 30k both, 80 games): on1@602k 39/80 = 48.8% \u00b15.6%, -9 Elo (first 8/40, second 31/40); Ham was 38.8% (first 15%, second 63%), specialist 73%. | 08:46 scarcity test (examples/pick_features.rs, 100 sp3 specialists' first picks): scarcity-weighted pips predict the expert pick no better than raw pips (#1 on 34 vs 33 boards, top-3 66 vs 70, mean rank 3.6 vs 3.1); o3-187 agrees with the expert on 60/100; on the 40 disagreements the expert's spot beats o3's by raw pips on 12 and by scarcity on 16. A scarcity input block is NOT the missing signal in general (1010194 is a scarcity board, but it's one of few).",
+   "launch": "bash runs/on1_launch.sh (branch opening-net's az.py + extension from ../catanatron-opening; actor image built from the branch, pushed 00:48 digest 5edbc0dc)",
+   "started": "2026-11-11T00:52",
+   "score_file": "runs/on1.panel",
+   "plan": "Committed direction (user, 01:15 Nov 11): make the separate opening network work even if on1 has issues. Watch: opening policy loss (rose 0.47 -> 0.515 in the first 70 iterations at lr 2e-4: if still rising at 50k, resume with --opening-lr 1e-4 or relaunch on2 at 5e-5), opening value loss (ceiling ~0.18-0.19 vs 0.205 now), first-placement agreement with the panel specialists (runs/opening_probe.py, every 30 min), panel. Variants ready via runs/on_launch.sh <run> <flags>: on2 lower opening lr; on3 bigger opening net (--opening-hidden 1024 --opening-layers 6, grown from the copy); on4 main net without placement rows (needs a flag); later a GNN/attention opening net over the 54 spots.",
+   "verdict": "promote (continue training; adopt the opening network into main and the live bot)",
+   "stopped": "2026-11-11T09:29",
+   "result": "on1 stopped 09:29 Nov 11 at 826,880 games (2510 iterations) to hand the fleet to on2 (continues from on1's weights). Last 125k games: panel 39.2 (4 boards), Ham 53.9; 100-board panel 36.7 at 602k. Kept resumable (runs/on1: model.pt, omodel.pt, replay.pt). Pig on random boards (MCTS 30k both, 80 games): on1@602k 38/80 = 47.5% \u00b15.6%, -17 Elo (first 21/40, second 17/40); Ham was ~40%.",
+   "resume": "add on1 to runs/fleet.json arms, then FORCE=1 bash runs/on1_resume.sh (same flags, --hard-boards 0 --endgame-branches 0)"
   },
   {
    "id": "fs1",
@@ -59,7 +68,7 @@
   {
    "id": "sp3",
    "title": "100-board held-out specialist panel",
-   "lane": "running",
+   "lane": "done",
    "kind": "infrastructure",
    "hypothesis": "A 100-board panel (specialist gap, \u00b10.2 mean) detects board-specific evaluation gains at 25-50k games where Ham needs 300k.",
    "indicator": "boards finished (/specialists page); then score every arm snapshot + baselines on it",
@@ -70,17 +79,18 @@
     "sp3"
    ],
    "started": "2026-11-10T20:56",
-   "notes": "21:40: boards 1030012-1030014 came out untrained (their actor was reclaimed and the keeper didn't see specialist learners launched as 'python -u az.py'); keeper fixed, those boards dropped from results and redone. Keep rule: a panel specialist needs >= 400 train steps and >= 6 shards."
+   "notes": "21:40: boards 1030012-1030014 came out untrained (their actor was reclaimed and the keeper didn't see specialist learners launched as 'python -u az.py'); keeper fixed, those boards dropped from results and redone. Keep rule: a panel specialist needs >= 400 train steps and >= 6 shards. | Nov 12 08:20: searched first picks of every sp3 specialist on its board (examples/search_pick, 600/2,400 sims; runs/expert_picks2/search_picks.txt) = the raw policy's pick on 97-98/100 boards (top-visit share 0.97-0.98); forced-rate regret of the pick 1.3 pts either way. The expert labels are converged picks, not policy noise; the 68% label ceiling is the 400-game forced rates. Exceptions: 1030090 raw 12 (forced 37%) vs search 16 (60%) - a bad raw label on one of on6's worst panel boards; 1030050 raw 12 (52%) vs search 10 (44%); 1030034 raw 17 vs search 18 (unlabelled).",
+   "result": "100 of 100 boards finished 07:00 Nov 11 (all 'gave_up' = none hit the +2.0 success threshold, but every specialist beats o3-187 on its board: best win vs base mean 66.2%, range 55.0-85.6%). Panel100 is ready for scoring (runs/boards/panel100.json, runs/sp3-<seed>/)."
   },
   {
    "id": "rr2",
    "title": "Bundle v2: reach block at 10x learning rate + sibling labels + move forks + hard boards + per-game value weight",
-   "lane": "running",
+   "lane": "done",
    "priority": 1,
    "kind": "arm",
    "hypothesis": "rr's components could not be judged because the zero-init reach inputs never engaged (weight norm 2.6 vs 147 after 96 iterations). With their own weights at 10x lr the relational features (reach/secure/contested/affordability) can move the board-specific evaluation.",
    "indicator": "reach-block weight norm (expect > 20 by 50k games; rr reached 2.6), value loss on the fixed unseen set vs o3-187 (0.154), panel mean",
-   "kill": "50k: panel <= 36.5 AND reach norm < 10 AND Ham <= control. 100k: Ham < control - 0.5 or panel <= 37.",
+   "kill": "100k kill waived (user, 23:35 Nov 10: the reach block only reached a meaningful norm around 50k, so its effect may lag). 200k: kill if panel <= 37.5 (control's level there) or Ham < control - 0.5. 300k: promote if panel >= 38 or Ham >= control + 1.0.",
    "extend": "panel >= 38 at 50k, or Ham >= control + 1.0",
    "cost": "2 actors, ~75 min per 100k games, ~$3 per 100k",
    "runs": [
@@ -89,7 +99,10 @@
    "launch": "bash runs/rr2_launch.sh, then add rr2 to runs/ax_keeper.sh ARMS",
    "started": "2026-11-10T22:25",
    "score_file": "runs/rr2.panel",
-   "notes": "launched with --games 0 (shards only; learner idles when no shard arrives) and 2 actors; panel + Ham scorers follow it"
+   "notes": "launched with --games 0 (shards only; learner idles when no shard arrives) and 2 actors; panel + Ham scorers follow it | 23:25: 50k checkpoint passed by rule (no kill): panel 35.2-36.4 at 60-80k (control 35.7@50k, 37.0@100k), Ham 50.4 vs control 50.6 at 50k and 50.8 vs 50.4 at 80k (matched games), reach-block weight norm 4.9@2.5k -> 14.3@47k -> 18.2@81k (rr reached 2.6): the indicator is moving but the panel has not. 100k due ~23:40; the rule kills if Ham < control - 0.5 or panel <= 37. | 23:35: extended past 100k by the user; next decision at 200k (~01:00), reports in runs/rr2_100k.out and runs/rr2_200k.out. | 23:41 100k (information only, extended): Ham 51.0 vs control 51.7@104k (50.8 vs 50.8 at 90k), panel 34.6 (lowest so far; control 37.0@100k), reach-block norm 20.0 (target reached).",
+   "stopped": "2026-11-11T00:52",
+   "result": "Stopped at 167k games (580 iterations) to make room for the opening-network arm (one arm at a time). Panel mean by game range: 36.6 (0-50k), 36.3 (50-100k), 36.4 (100-140k), 37.3 (140-167k); control 35.7@50k, 37.0@100k, 37.5@200k. Ham: 50.2 / 50.6 / 51.1 / 51.3 vs control 50.6 / 50.4-50.8 / 50.9-51.2 / 51.0-51.2 at matched games. Reach-block weight norm 4.9@2.5k -> 20@100k (rr: 2.6): the 10x learning rate made the block engage, and the panel stepped up ~1 point after 140k (level with the control, not above). Verdict: inconclusive, but its 140-167k panel readings (37.3 mean, 37.9 best at snap 510) are the highest seen for any generalist; kept resumable for a later continuation. Note: last 25 min ran without actors (fleet handover + Zen 5 reclaims).",
+   "resume": "runs/rr2/model.pt + replay.pt (600k examples) + omitted nothing: add rr2 back to runs/fleet.json arms, then from python/: nohup .venv/bin/python az.py --run rr2 --resume --remote-control-key models/control_rr2.json <COMMON from runs/rr2_launch.sh without --init> > runs/rr2.out 2>&1 & and restart its scorers (score_runs.py openhex_models/ham.ctnn rr2; panel_score.py rr2). Do not delete runs/rr2."
   },
   {
    "id": "distill-values",
@@ -143,7 +156,8 @@
    "extend": "standard",
    "cost": "1-2 weeks of model + Rust inference work; inference speed is the risk",
    "depends_on": "rr2 and distill-values results (is the data side enough?)",
-   "runs": []
+   "runs": [],
+   "notes": " 15:40 Nov 11: the opening half of this card is now spot-net (per-spot head), prioritised by the open-curve result."
   },
   {
    "id": "ham-live-fix",
@@ -242,6 +256,215 @@
     "sp2-1012006"
    ],
    "finished": "2026-11-10T21:15"
+  },
+  {
+   "id": "on2-structure",
+   "title": "on2: opening network + spot-structure input block (scarcity shares, resource pairs, numbers), continued from on1's weights",
+   "lane": "done",
+   "priority": 1,
+   "kind": "arm",
+   "hypothesis": "Across the 100 board specialists, a linear ranking over hand features predicts the expert's first pick on 52% of held-out boards; scarcity (a spot's share of the board's supply of each resource) is the strongest group (-9 pts top-1 when removed), production and resource pairs next. The experts also prefer brick/wood over ore relative to o3-187. The opening net has to reconstruct these from raw tiles; given directly (board-constant, 5 + 54x13 + 1 inputs, zero-initialised so play is unchanged at start) it should learn board-specific first picks faster. Search cannot supply the signal: on 1010194 the 2,400-sim target puts 98.6% on node 13 vs the 89.5% prior, and 200k sims reaches 99.9%.",
+   "indicator": "first-pick agreement with the 100 specialists (runs/expert_picks.py data; on1 58/100, o3-187 60/100), 100-board panel (on1 36.7 at 602k; control 34.7), opening value loss (on1 0.193); runs/on2.valuetrack (value-head Spearman vs forced win rates, regret)",
+   "kill": "100k games after launch: panel100 below on1's 36.7 or first-pick agreement below 58/100",
+   "extend": "panel100 >= 38 or agreement >= 65/100",
+   "launch": "after the branch image is pushed: bash runs/on_launch.sh on2 --structure-features --init runs/on1/model.pt --opening-init runs/on1/omodel.pt (stop on1 first; one arm at a time); add on2 to runs/fleet.json arms",
+   "runs": [
+    "on2"
+   ],
+   "depends_on": "on1 (weights), branch opening-net commit with the structure block",
+   "started": "2026-11-11T09:29",
+   "score_file": "runs/on2.panel",
+   "notes": "09:31 launched: both nets widened 2202 -> 2918 inputs (zero weights), opening net continues from on1's 148,517 steps at lr 2e-4; actor image 9bc37123 (branch 6e75886); 3 boxes handed over from on1 within a minute; shards with obs_size 2918 flowing. Trackers: runs/on2_checkpoints.out (50k/100k vs control), runs/on2.agree (first-pick agreement with the 100 specialists; on1 58, o3 60). | 11:01 restarted with --placement-forks 3 --move-forks 0 (same cost; ~3x the opening counterfactuals). Reason: the first settlement was forked in ~1/8 of games (fork point uniform over the 8 opening decisions) and the alternative lands on an expert-like low-prior spot ~7% of those -> ~0.7% of games carried any counterfactual about the first pick (the policy on 1010194 swung 0.5-19% on node 19 over 827k games with no trend). Uniform draw kept at 0.25 (uniform over ~50 spots is mostly junk). Feature-mining agent report: runs/expert_features_report.md (first-pick hand features saturate ~54-59% vs an ~87% label ceiling; the expert's pick is worth +14 pts of win rate; the REPLY is the largest uncaptured gap (+10 pts vs o3's reply; opponent-plan damage/blocking features); plan/greedy scores and pips x scarcity predict forced win rates). | 11:20 next restart (after the fork image lands): --placement-forks 4 --fork-settlements-only (each of a game's 4 settlements forked, roads not) --placement-margin 2 (alternative drawn uniformly from spots within 2 pips of the best legal spot, no junk) --regret-forks (fork weights per settlement ordinal from the running mean regret, published each iteration) --placement-uniform 0.1. Open A/B for later: --sims-placement 2400 -> 1200 (~5% more games; search helps placements +4-6 pts on some boards and not at all on scarcity-trap boards; expert agreement of o3's 20k search 74/100 vs network 60/100). | 11:16 image 87f2a7e4 (branch 368be73) pushed and actors rolled; on2 restarted with --placement-forks 4 --fork-settlements-only --placement-margin 2.0 --regret-forks --placement-uniform 0.1 --move-forks 0 (regret-weighted settlement forks; fork weights and per-ordinal regret now in the log). | 11:40 one-ply value probe (examples/value_pick.rs) on the 100 expert boards vs forced win rates (8 candidates/board): value-head Spearman expert 0.80, o3 0.62, on1@826k 0.64, on2@440it 0.64; regret of the value argmax expert 1.1 pt, o3 6.2, on1 6.8, on2 7.7; value 1-ply argmax agrees with the expert on 63 (o3), 57 (on1), 53 (on2) vs policy argmax 60/63/61 -> the opening net's value head ranks placements no better than o3's after 1M games; 'value knows, policy lags' is NOT supported; no free lunch from a value one-ply rule. Tracker runs/on2.valuetrack (hourly): the metric the forks should move (Spearman 0.64 -> toward 0.80, regret_val down). 12:30 200k look (203k total, 65k since the 11:17 fork restart at 138k): Ham 54.4 (last 10 snaps; on1 53.9; on2 pre-forks 54.5), panel100 38.7 @it590 (on1 38.3, on2 38.3 @it210), agree 62-63/100, value Spearman 0.651 (0.647 pre), regret_pol 6.0; fork regret by placement flat since the restart [0.31,0.40,0.24,0.31]->[0.32,0.39,0.23,0.32], weights settle at [1.03,1.21,0.72,1.04]. Structure block held its +0.5 Ham; the fork arm has moved nothing yet. Actor note: c8a.16xlarge makes ~2,000 rows/s on on2 vs 3,000 on on1 (structure block widens the input); forks raise rows per counted game 209->309, so the keeper's games/h table overstates on2 by 2.2x in games, 1.5x in rows. 13:05: fork arm judged null early (65k games after the 11:17 restart: regret per placement flat, Spearman 0.651 vs 0.647, agree 62, Ham flat at 54.4); stopped for on3 when its image is up (resumable; on3 starts from these weights). Final numbers in the 200k look above.",
+   "finished": "2026-11-11T13:01",
+   "result": "Structure block: +0.5 Ham (54.4 vs on1 53.9) and panel100 38.3 -> 38.7 (noise) in its first 100k; the settlement-fork restart (138k-254k) moved no yardstick. Stopped at 253,696 games, resumable (runs/on2); on3 continues from its weights."
+  },
+  {
+   "id": "on3-openings",
+   "title": "on3: opening-relation input block (plan / greedy-opponent / pips x scarcity / number spread; in the opening: opponent plan damage, distance, road block, shared tiles, denial, local rank, own complement)",
+   "lane": "done",
+   "priority": 1,
+   "kind": "arm",
+   "hypothesis": "The inputs, not the labels, limit opening learning: with clean forced win-rate labels the opening net cannot rank first picks on new boards (value_fit_test), and the report's groups (plan/greedy for the first pick's value, opp relation for the reply, own complement for second settlements) are what the specialists track. Given directly (branch d34bce2, --relation-features, 54x20+74 inputs, zero-initialised so play is unchanged at start) the opening net should learn them.",
+   "indicator": "runs/on3.valuetrack (Spearman 0.65 -> toward 0.80, regret_val/regret_pol down), runs/on3.agree (62 -> 70+), 100-board panel (on2 38.7), Ham (on2 54.4), opening value loss",
+   "launch": "bash runs/on_launch.sh on3 --structure-features --relation-features --init runs/on2/model.pt --opening-init runs/on2/omodel.pt; bash runs/arm_monitors.sh on3 on2:control; fleet.json arms on2 -> on3",
+   "depends_on": "on2 weights; branch d34bce2 image pushed",
+   "runs": [
+    "on3"
+   ],
+   "kill": "100k games: Spearman and agreement unchanged and panel100 not above 38.7; 200k: no yardstick above on2",
+   "started": "2026-11-11T13:03",
+   "score_file": "runs/on3.panel",
+   "notes": "13:03 launched from on2's weights (both nets widened 2918 -> 4072, new weights zero; opening net 219,728 steps so far); image 6bfcedbb; monitors armed 13:05 (runs/on3.agree, runs/on3.valuetrack, runs/on3_checkpoints.out at 50k/100k/200k vs on2:control with panel100). on2 final (snap 810, 253,696 games): Spearman 0.631, regret_pol 6.0 / regret_val 6.9, agree 65/100. 17:50 Pig on random boards (MCTS 30k both, same seeds as on1/on2): on3 final 27/57 = 47.4% \u00b16.6 (first 15/29, second 12/28), stopped by the user; on1@602k 47.5% (80), on2 final 23/45 = 51.1% (paused). No separation between the three at these sample sizes.",
+   "finished": "2026-11-11T16:18",
+   "result": "Relation block, 163,840 games from on2's weights (stopped early by decision, resumable): Ham 55.3-56.2 on the last snapshots vs on2's 54.4 (+1 to +1.8, the largest Ham move since on1); 100-board panel 38.6-39.2 vs 38.7; expert agreement 60-65 and value Spearman 0.63 unchanged. The Ham gain with flat opening yardsticks is unexplained; on4 continues from these weights."
+  },
+  {
+   "id": "placement-flatten",
+   "title": "Placement root-prior flattening over the plausible spots (search-side)",
+   "lane": "done",
+   "priority": 2,
+   "kind": "arm",
+   "hypothesis": "Search amplifies the opening net's prior at placement roots (2,400 sims: 98.6% on the prior's pick), so flattening the root prior over the spots within 2 pips of the best would let the visit target move toward spots the prior underrates.",
+   "indicator": "2,400-sim first-pick agreement with the 100 experts, flattened vs plain, before any training",
+   "result": "null-to-negative, killed before launch (13:00): on2@710 plain search agrees with the expert on 74/100, flattened (lambda 1, margin 2) on 69/100; on 1010194 the flattened search still puts 96.5% on node 13. The search's own values prefer the prior's pick: the error is in the value estimates, not the prior. Kept as MctsConfig::placement_flatten / --placement-flatten (default off).",
+   "runs": [],
+   "started": "2026-11-11T12:40",
+   "finished": "2026-11-11T13:00"
+  },
+  {
+   "id": "forced-value-labels",
+   "title": "Forced-play first-pick win rates as a value target for the opening net",
+   "lane": "done",
+   "priority": 2,
+   "kind": "arm",
+   "hypothesis": "The opening net's value head ranks first picks at Spearman 0.65 against forced win rates (experts 0.80) because single-game outcome labels are too noisy; clean win-rate labels would teach the ranking.",
+   "indicator": "runs/value_fit_test.py: fit on2's opening net to the 809 forced first-pick win rates of the 100 expert boards, 5-fold by board, held-out Spearman",
+   "result": "killed before launch (13:00): held-out Spearman 0.635 untouched -> 0.629 full fine-tune (train 0.99) / 0.577 head-only (train 0.71). Clean labels on 80 boards do not transfer to new boards and a linear probe on the trunk cannot even fit them in-sample: the inputs lack what the ranking needs. (Forks already give balanced one-game labels; averaging them adds no information per game.) -> on3 features.",
+   "runs": [],
+   "started": "2026-11-11T12:45",
+   "finished": "2026-11-11T13:00"
+  },
+  {
+   "id": "open-curve",
+   "title": "Opening board-count curve: first-pick learner with a fixed play policy over 1k / 10k / 100k boards (LoCM draft framing + Procgen level curve)",
+   "lane": "done",
+   "priority": 1,
+   "kind": "analysis",
+   "hypothesis": "The opening problem is zero-shot generalisation across boards (Procgen: hundreds of levels overfit, ~10k close the gap). With the play policy fixed (on2 nets, network-only) the first pick's value per board is cheap to label (8 pips-best picks x 48 games = 90 CPU-s per board, +-7 pts per label, two labelings agree on the best pick 68% of the time). Supervised fits on 130 and 1,000 boards both memorise (train 94-99% top-1) and get WORSE held out (48% -> 38%, experts 65 -> 53). If held-out agreement rises with 10k and 100k boards we are data-limited and an oracle actor mode is worth building; if it stays flat the inputs/architecture limit it and the per-spot network is next.",
+   "indicator": "runs/oracle_fit.py held-out pilot top-1 vs the oracle's best pick (ceiling ~68% at 48 games), expert agreement on the 100 specialist boards (65 untouched), value Spearman (0.63); learning curve in N boards",
+   "launch": "static probes forced_pick/forced_obs under s3://.../models/pilot/, run as an ECS task on a borrowed keeper box (runs/oracle_pilot_task.sh <seed start> <n boards>); results to shards/pilot/out_<seed>.tgz; fit with .venv/bin/python runs/oracle_fit.py on2 <dir> --epochs 100",
+   "kill": "10k boards: held-out top-1 not above the 1k run's best (48%) -> representation-limited, stop the curve and go to spot-net",
+   "extend": "held-out rising with N -> 100k boards (~40 box-hours), then oracle-actor",
+   "runs": [
+    "pilot 1k (oracle_pilot)",
+    "10k (oracle_10k, seeds 2010001-2020000, 48 games/pick, 46 min on a c8a.16xlarge)"
+   ],
+   "started": "2026-11-11T15:40",
+   "depends_on": "nothing new; borrows one actor box per 10k boards (~4 h)",
+   "notes": " 16:05 horizon curve (examples/horizon_value.rs, 100 expert boards, 8 pips-best picks, 48 network-only playouts, on2 nets; ranking vs the experts' 400-game forced win rates): one-ply value Spearman 0.633 / regret 6.4 pts; value at the END OF THE OPENING 0.683 / 4.0; turn 5: 0.715 / 3.6; turn 10-20: ~0.70 / 3.8-4.4; turn 40-80: 0.68-0.69 / 5.5-6.1; 48-game OUTCOME 0.658 / 6.3. The main net's value read a few turns after the opening ranks first picks better than 48 full-game outcomes and nearly halves the one-ply regret; the opening net lacks what a 5-turn lookahead supplies (the reply and second settlements). -> card horizon-targets.",
+   "finished": "2026-11-11T16:40",
+   "result": "FLAT in N -> representation-limited. Held-out pilot top-1 vs the oracle's best pick, untouched -> best epoch -> last: 130 boards 59%->?; 1,022 boards 48% -> 48% -> 38%; 10,000 boards 47% -> 47% -> 42%, while the training boards reach 94-99% and expert agreement falls 65 -> 45-53 in every run. Ten times the boards gave no held-out gain at all. Label-noise ceiling 68% (two labelings agree on the best pick 27/40). The 100k point is not worth running. Next: spot-net (architecture), tested supervised on these 11k labelled boards first."
+  },
+  {
+   "id": "oracle-actor",
+   "title": "Oracle actor mode: actors label plausible first picks (and later replies) on random boards with network-only playouts and ship the rows with the shards",
+   "lane": "ready",
+   "priority": 2,
+   "kind": "arm",
+   "hypothesis": "If open-curve shows held-out agreement rising with board count, the opening net needs balanced, low-noise labels over far more boards than self-play provides: a network-only playout costs ~1/25 of a search game, so an actor can label ~40 boards/h/core.",
+   "indicator": "runs/<run>.agree, runs/<run>.valuetrack, panel100",
+   "launch": "needs: self_play oracle mode in selfplay.rs (forced pick, K playouts, rows with pi = softmax(win rate / tau) at the pre-pick position and z = win rate at the post-pick position), shards flag, az.py mixing weight; image push",
+   "runs": [],
+   "depends_on": "open-curve rising"
+  },
+  {
+   "id": "spot-net",
+   "title": "Per-spot shared-weight opening head (hex-graph convolution / per-node MLP + pooling) instead of a flat MLP over 54 node blocks",
+   "lane": "running",
+   "priority": 1,
+   "kind": "arm",
+   "hypothesis": "A flat MLP must learn the same 'is this spot good here' function 54 times with only the 12 symmetries to tie them together; the Catan placement thesis (TU Crete 2024) and Procgen both lean on convolutional inductive bias over the grid. If open-curve is flat in N, the representation is the limit and this is the lever.",
+   "indicator": "open-curve's held-out top-1 with the new head at 1k and 10k boards (supervised first, no actors), then the live arm's agree/valuetrack/panel100",
+   "launch": "BUILT 00:30 Nov 12: model.SpotHead (per-node MLP over the node's NODE/SPOT/STRUCT/REL entries (59) + a projection of the trunk's last layer, one round of message passing over road distance 1 and 2, zero-init output added to the settlement logits; 64 wide), spots.spot_head_tables, CTNN version 3 (export.py / nn.rs read_spot_head; sparse, subset and batched paths agree exactly; PyTorch vs Rust within f16), catanatron_rs.settlement_slots, az.py --opening-spot-head/--opening-spot-width (loads a trained opening net with strict=False, head missing). Launch: runs/on6_launch.sh from on5's weights after on5's verdict; needs infra/push.sh (version-3 loader in the actor image) and the pylib rebuilt between arms.",
+   "runs": [
+    "on6"
+   ],
+   "depends_on": "open-curve flat (done 16:40): the oracle labels of 11k boards (pilot + 10k sets) are the supervised test bed; no actors needed for the first test",
+   "notes": "Nov 11 23:40-00:10 supervised test (runs/spot_fit.py on examples/spot_dump.rs structure + oracle labels, 11,046 boards, 10% held out, 100 expert boards eval only; label-noise ceiling from 40 double-labelled boards: top-1 68%, Spearman 0.80). spot (per-node MLP + 2 rounds of message passing over distance-1/2, 120k params, 36 hand features/node + board context): held-out top-1 43-45% = train 43-47% (NO memorisation gap), Spearman 0.48, experts 50-63/100 (self-play opening net 62-67). Controls on identical inputs: flat from scratch 36% held-out / 47% train (memorises, -8 pts); perspot (no message passing) 40-41%; hidden 256 x 3 rounds 42-44% (train 50%); raw tile one-hots 42% (train 51-57%); 1k boards 45%, 3k 43% -> flat in N already at 1k. => weight sharing removes memorisation and beats flat on the same inputs, but saturates well under the noise ceiling: the remaining label variance is not in spot-local features. Pretrained flat fine-tune had 48% held-out (carried self-play knowledge) at the cost of expert agreement 65 -> 45-53. Long fits (300 epochs) running to rule out under-training. | 00:20 long fits: hidden 256 x 300 epochs -> train 91% / held-out 36% / experts 41 (it CAN memorise boards through message passing once trained long enough; the 44% is the early-stopped optimum); hidden 128 x 200 epochs at lr 3e-3 -> train 61% / held-out 40%. So: not under-trained; the plateau is the inputs. Next: per-node relation/structure block entries (opp reply damage, denial, plan score, local rank) as spot features in the supervised harness, then the arm. | 01:30 Nov 12 + relation constants per node (examples/relation_dump.rs, 9 entries: plan, greedy opp plan, greedy loss, covers, pips x scarcity, hit, pip var, 5-6-8-9): spot 45-50% held-out (two seeds), Spearman 0.53, experts 60-65 (= self-play opening net), still no train gap; perspot 43% / 0.48; flat same inputs 37% / 0.41; hidden 256: 45% / 0.51; 1k boards 46% / 0.50. => the opponent-reply constants are the first inputs that move the spot-net; it stays flat in N and in capacity. Ceiling 68% / 0.80. | 00:33 Nov 12 LAUNCHED as on6 from on5's weights (runs/on6_launch.sh via runs/arm_switch.sh on5 on6; image pushed 00:33 with the version-3 loader; fleet arm on6 cost 3.0). Monitors: Ham/Gaz/panel scorers + arm_monitors.sh on6 on5:control 100k/200k/300k. Yardsticks to beat: Ham 57.0-57.2, panel 39.3-40.0, agree 61-67, Spearman 0.66. Leading indicator: runs/on6.agree and regret_pol in the value track (the head is the policy); expect flat for ~30-50k games while the head's output grows from zero. | 04:35 Nov 12 at 233k games: Ham 58.1-58.5 (on5 57.0), Gaz 52.7-53.2, panel100 41.5-41.8 (39.3-40.0), regret_pol 5.6-5.9 (6.5-6.7), Spearman 0.67, agree 62-68: best arm on every yardstick. Inspection: tables correct; head uses REL own_score/plan/greedy/own_cover/opp_hurt most, message passing live (self 23 / d1 14 / d2 9); flips 25% of first picks, 50% of second settlements. FOUND: head scores carry a ~+340 common offset (ctx projection) with node differences < 1 -> under bf16 autocast the training forward quantised them at ~2.0. FIX 04:39: SpotHead runs in float32 (model.py; exported function unchanged), on6 resumed at 239,616 games (runs/on6_resume.sh). Expert-board decomposition (first pick, omodel at 233k): flat alone 50/100 (regret 9.5), head alone 57 (7.4), sum 59 (6.4); on5 flat 63 (6.3) -> the flat positional head has drifted and still has ~3x the head's spread among top candidates; candidate follow-up: damp or freeze the flat settlement rows. Worst panel boards (1030012/090/068/064, 25-29%): expert's pick ranked 2-4 with P 0.04-0.28, forced-rate gap 20-29 pts; the expert's pick has higher own_cover/own_compl and lower greedy loss than ours. | 04:56: float32 fix confirmed (open_pi 0.414 -> 0.395 in 16 iterations; head spread among top-8 candidates 0.5 -> 3.4; flips 9/30 first picks) but the common offset drifted +340 -> +1169 in 4k steps -> scores now CENTRED over nodes (model.py + nn.rs; policy unchanged at placements; wheel rebuilt in wheels_probe for the next switch; actors still on the uncentred image = same softmax); resumed at 256,256 games. Search curve on6@480: 150 sims 3.6 / 600 3.4 / 2400 3.5 / 9600 3.7 / 38400 3.7 pts (on4: 3.9/3.8/3.8/3.7/3.5): placements still do not scale with search; the better prior helps only at low budgets; the ~3.5-pt floor is the value function. | 05:40 Nov 12 play-time search vs specialists (runs/panel_search.py, 10 panel boards incl. the 5 worst, 100 games each, on6@490-510): on6 600 sims vs raw specialist 54.8% (network-only 39.3%); both at 600 sims ~44% (network-only ~36%): search now helps on6 by ~+8 even against a searching specialist (o3 gained nothing on Nov 10) - the stronger placement prior moved the search knee from ~9,600 to 600 sims. The remaining ~12 pts in the fair fight = board-specific lines after the opening. | 08:36 Nov 12: on6 PAUSED at 477,440 games (Ham 58.3-59.2, panel 41.5-41.8, agree 59-70, regret_pol 5.1-5.4) to give the fleet to the sp4 specialist batch; resume with runs/on6_resume.sh. | 09:10 Nov 12: on6@477k vs Pig on random boards running locally (runs/pig_on6_random.jsonl, 100 games, 12 at once, 30k sims; dashboard /pig). References: Ham 44.6%, on1 47.5%, on2 51.1% (45 games)."
+  },
+  {
+   "id": "micro-catan",
+   "title": "Micro-Catan: from-scratch self-play on the Mini map (24 land nodes) over N boards, the end-to-end RL version of the board-count curve",
+   "lane": "ready",
+   "priority": 3,
+   "kind": "analysis",
+   "hypothesis": "Supervised fits with a fixed play policy cannot show whether self-play itself discovers openings given enough distinct boards. The Mini map makes games ~4x cheaper; training one base policy there and then opening-only learners over 100 / 1k / 10k / unlimited boards gives the RL curve.",
+   "indicator": "held-out-board panel of Mini specialists (as sp3 but on Mini), opening agreement with them",
+   "launch": "needs: Mini-map base run (az.py --map-type MINI, OpenHex rules), a fixed-board-pool option in self-play (pool_seeds from a seed list), Mini specialist batch (specialists.py)",
+   "runs": [],
+   "depends_on": "open-curve result; a base Mini policy (2-4 actor-hours)"
+  },
+  {
+   "id": "horizon-targets",
+   "title": "Placement targets from short-horizon playouts: K network-only playouts per plausible spot to turn T, averaged main-net value as the policy and value target (replaces the 2,400-sim PUCT target at placements)",
+   "lane": "done",
+   "priority": 1,
+   "kind": "arm",
+   "hypothesis": "The horizon curve: the value seen 5 turns after the opening ranks first picks at Spearman 0.715 / regret 3.6 pts vs 0.633 / 6.4 for the one-ply value the search target reflects and 0.658 / 6.3 for 48 game outcomes. A playout to turn 5 costs ~25 forwards, so 8 spots x 12 playouts (~2,400 forwards) matches the current placement search budget while looking 8 placements + 5 turns deep instead of 2-3 plies. Targets: pi = softmax(V_T / tau) over the plausible spots, z = V_T for the post-pick row (lower variance than the outcome; 'regret through the horizon'). Applies to all 8 placement decisions (reply and second settlements included), which is where the expert gap is largest.",
+   "indicator": "runs/<run>.agree (62-65 now), runs/<run>.valuetrack (Spearman 0.63), 100-board panel (39.0), Ham (55.4); the actor-side probe first: agreement of the horizon pick itself with the experts (one-ply 65/100, 2,400-sim search 74/100)",
+   "launch": "engine: SelfPlayConfig placement_horizon_turns T / placement_playouts K / placement_candidates (pips margin); at placement decisions run the playouts (network-only, both sides by the current nets) instead of PUCT; az.py flags; image push; on4 from on3's weights; --placement-horizon-tau 0.1 --opening-value-q-weight 0.75 --max-steps 400 --max-opening-steps 300. Measure first with examples/horizon_value.rs at K=16 (running) to size K.",
+   "kill": "100k games: agree and Spearman unchanged",
+   "extend": "Spearman > 0.70 or agree >= 70",
+   "runs": [
+    "on4"
+   ],
+   "depends_on": "horizon curve (done); K sizing; on3's 200k verdict for the slot",
+   "notes": "16:10 K sizing (16 playouts per pick): one ply 0.633/6.4, end of opening 0.683/4.0, turn 3 0.704/4.3, turn 5 0.710/3.6, turn 10 0.693/3.5, 16-game outcome 0.588/8.3. The turn-5 value is as good at 16 playouts as at 48; the outcome label collapses. Budget: 8 spots x 16 playouts x ~25 forwards ~ 3,200 forwards per placement = today's 2,400-sim search. 16:29 on4 launched: on3's weights, --placement-horizon-turns 5 --placement-playouts 12 --placement-horizon-tau 0.2 (+ structure/relation blocks, settlement forks 4, margin 2); image 09fd530d; monitors vs on3:control. Local check: 2.7 s/game vs 3.2 with the search, opening target top-prob 0.48 vs 0.90. Event horizons (first road/settlement/city/dev) all worse than turn 5 (regret 5.0-5.1 vs 3.6). 17:32 FOURTH launch is the clean one. Root cause of the 17:14 and 17:21 blow-ups: the actors cache networks by S3 key, a relaunch reuses iteration numbers and keys, so the actors kept serving the diverged first launch's model_0000NN weights for the new learner's iterations (target entropy collapsed to 0.05, policy loss 1e8 within one iteration). Fixed by stopping the actor tasks (cache cleared) and purging shards/models; permanently by a launch token in the control file that makes actors drop their cache (image pushed). Step caps now 400 main / 300 opening. runs/status.sh <run> gives the one-screen health check. 17:59 FIFTH launch (the arm proper): horizon targets for SETTLEMENTS only, roads back to the 2,400-sim search, tau 0.1; image ded9fdc8 (launch token in control). Reason: with roads included at tau 0.2 the road targets were near-uniform (top-prob 0.46 of 3) and settlement targets 0.56; the 17:32 launch lost 3 pts vs Ham and 2.5 on panel100 within 10 iterations (52.0/52.8 Ham, 36.5 panel) while the main net's stats stayed at on3's levels (value loss 0.136, excess policy loss 0.065). 18:50 (at 56k games) --opening-value-q-weight 0.75: the opening network's value target is now 75% the horizon playout value and 25% the outcome (was 25/75 via --value-q-weight). Part of the arm's definition: the value head is the yardstick that has never moved (Spearman 0.636 at snap 120 = o3's 0.63); the turn-5 value label is the less noisy one. Judge at 100k on Spearman and agreement. 20:47 (at ~175k games) DECOUPLED: the playouts now supply only the value label (75% horizon / 25% outcome); the policy target and the move at settlements come from the 2,400-sim search again (engine ee18b4f, image ac0fd129; --placement-horizon-policy restores the coupled form). Reason: under the 12-playout softmax target the policy regret on expert boards rose to 6.6-8.6 (search ~6) and agreement fell to 54-62, while the value head's Spearman rose 0.63 -> 0.65 and its regret fell to ~6. Precedent: KataGo trains the policy only on full searches, MuZero bootstraps the value target, Lc0 blends q; none use rollout softmaxes as policy targets.",
+   "started": "2026-11-11T16:29",
+   "score_file": "runs/on4.panel100",
+   "result": "on4 (from on3's weights), 353,536 games, stopped 23:21 Nov 11 to hand the fleet to on5 (continues from on4's weights; resumable: runs/on4 model.pt/omodel.pt/replay.pt, runs/on4_resume.sh). Phase 1 (horizon softmax as policy AND value target, roads included): roads got near-uniform targets, Ham -3 / panel -2.5; restricted to settlements, then DECOUPLED at ~200k: value head learns the turn-5 horizon label, policy from the 2,400-sim search. After decoupling: Ham 56.1-57.0 (57.0 at snap 740 = highest ever; on3 55.4), Gaz 50-51, panel100 38.9-40.0 (on3 ~38.7), value Spearman 0.63 -> 0.655-0.673 (first movement in 1M games), regret_val 7.3 -> 5.8 at the end, agree_val 54 -> 66, agree_pol 62-67. Search curve (examples/search_pick.rs): first-pick regret 3.9 pts at 150 sims, 3.5 at 38,400, identical for on3 and on4: search saturates early and the better value head did not change its picks; the prior (6.5) vs search (3.9) gap is the policy's, not the budget's. Surprise by kind (runs/surprise_by_kind.py): placements 0.372 -> 0.328 nats, overruled 47% -> 42%; placements+roads+robber still 54% of all surprise."
+  },
+  {
+   "id": "award-features",
+   "title": "Award reach + port fit block (held)",
+   "lane": "done",
+   "priority": 2,
+   "kind": "arm",
+   "hypothesis": "A watched Gaz game missed an easy block where denying the opponent both awards (4 points of swing at 4 VP) decided the game. The raw facts (road lengths, pieces left, knights played, dev cards, unseen deck) are inputs already, but 'can they still get there' needs road geometry and knight arithmetic the net has to derive; given directly (per seat: roads needed + open extension within that many steps, knights needed + possibly available, reachable flags, points + reachable awards, swing) the main net should price award threats and blocks correctly. Roads were the largest regret category in the self-disagreement probe (28%).",
+   "indicator": "Ham and 100-board panel (main-net effect); a block probe first: in self-play games, how often the loser had a one-move cut available in the turns before the winner completed longest road",
+   "launch": "branch commit after ee18b4f (encoding: award block, examples/award_probe.rs); image push; on5 from on4's weights with --award-features (+ structure/relation, horizon value label, decoupled policy); main net widened by 34 zero inputs",
+   "kill": "100k games: Ham and panel not above on4's",
+   "runs": [
+    "on5"
+   ],
+   "depends_on": "on4's verdict (slot); the block probe before launch",
+   "notes": "21:20 Nov 11: built and tested (encoding + self-play tests green; probe values sane on board 1030007). Base map only for size identification. Not pushed to the image yet. | Nov 11 22:25: block widened to 12 per seat + 2 per land node + 107 markers (unique size on Base; Base-only). Per seat adds port fit (production already discounted by held ports), top-resource pips, its discount, and road distance to its 2:1 port. Per node: unbuilt 2:1 port of the observer's top resource; cut targets (unbuilt buildable interior nodes of an opponent's road) graded by the observer's road distance. Probe on on3 self-play: cut targets ~never appear (the net builds at the road's end at once); port reach and fit vary as expected. Hold until on4 flattens. | 23:21 Nov 11: LAUNCHED as on5 from on4's weights (runs/on5_launch.sh; inputs 4072 -> 4335, new weights zero; actor image pushed 23:20 from the opening branch; fleet arm on5 cost 3.0 guessed). Monitors: Ham/Gaz/panel scorers, agree100, value tracker, checkpoints at 100k/200k/300k vs on4. Expect: nothing moves for the first ~50k games (zero weights); Ham/panel vs on4's 57.0/40.0 by 200k.",
+   "result": "on5: 71,680 games (23:21 Nov 11 - 00:33 Nov 12), stopped early by choice to launch on6 (spot head) from its weights, so the block stays in the lineage untested on its own: Ham 56.7-57.2 (on4 57.0), Gaz 50.3-51.6, panel100 38.8-39.3, Spearman 0.666, agree 61-64 = on4's level, as expected with the new columns near zero. Resumable: runs/on5."
+  },
+  {
+   "id": "sp4",
+   "title": "100-board specialists from on6 (spot head + all blocks): refreshed expert labels and a second, harder panel",
+   "lane": "paused",
+   "priority": 1,
+   "kind": "batch",
+   "hypothesis": "Specialists fine-tuned from a stronger, better-generalising base (on6) define better expert picks (the labels the opening head is judged against) and a harder panel. Trial on 1030001: on6 base already 47.5% vs the sp3 specialist; the sp4 trial reached 52% vs the on6 base after 17 shard-fed iterations (4.5k games) with the same first pick (node 12); opening loss 0.33 -> 0.12 = specialising, not degrading.",
+   "indicator": "runs/sp4/results.jsonl (best_win vs on6 base per board; sp3 was 55-86% vs o3), then refreshed runs/expert_picks via node_features with the sp4 nets, panel100 re-scored against sp4",
+   "launch": "08:36 Nov 12: runs/sp4_batch.sh (specialists.py --az <branch az.py>, net_key pairs snap@osnap; --max-iters 24 --eval-every 8; on6 paused at 477,440 games, resumable via runs/on6_resume.sh; fleet arms {sp4: 4}). ~7 min per board with 4 boxes at cost 3.0 -> ~12 h.",
+   "kill": "if the first 10 boards all end <55% vs the on6 base and their first picks equal sp3's, the refresh adds nothing: stop and resume on6",
+   "notes": "Searched first picks of the sp3 specialists = raw picks on 97-98/100 (runs/expert_picks2/search_picks.txt), so the pick labels were converged already; the refresh is about a stronger expert, not search. | 09:10 Nov 12 PAUSED after 2 boards (1030001: 60.5% final / 63% best vs on6 base = -8 pts vs sp3's gap over o3; 1030002 done) to give the local cores to the on6 Pig match; resume with `bash runs/sp4_batch.sh` (finished boards skipped) + `runs/sp4_h2h.py --loop 5` (sp4 vs sp3 head-to-head follower). Dashboard: /specialists?batch=sp4 with final win, gap vs sp3's gap, and head-to-head columns. Fleet arms still {sp4: 4} (boxes idle while paused)."
+  },
+  {
+   "id": "board-heads",
+   "title": "Mid-game board heads on the main network: shared node encoder + settlement/city per node, road per edge, robber per tile (spot-net for the rest of the game)",
+   "lane": "running",
+   "priority": 1,
+   "kind": "arm",
+   "hypothesis": "The spot head generalised placements where the flat head memorised (on6: Ham 57 -> 58-59, regret 6.5 -> 5.4). Roads and the robber are the other 32% of search surprise and the specialists' 20-pt midgame edge is board-specific lines the flat positional head cannot read across boards. The same shared-weight representation over nodes, extended to edges (endpoint embeddings) and tiles (adjacent-node mean), should let the generalist learn those lines across boards.",
+   "indicator": "surprise by kind (runs/surprise_by_kind.py: road 0.122 / robber 0.072 nats, 17% / 15% of all surprise on on4), panel100 (on6 41.5-41.8), Ham (58.3-59.2), Gaz (53), fair-fight search vs specialists (44.5% at 600 sims both)",
+   "launch": "BUILT 10:30 Nov 12 on the branch: model.BoardHeads (width 32, 25k params; node encoder = spot head's; edge = [z_a+z_b, |z_a-z_b|, EDGE entries]; tile = [mean z over its nodes, TILE entries]; all outputs zero-init and centred per kind), spots.board_head_tables + catanatron_rs.board_slots, CTNN version 4 (export.py; nn.rs read_board_heads + Dense f32 input-major layers; sparse/subset/batched paths agree exactly; PyTorch vs Rust within f16), az.py --board-heads/--board-width (init from a trained net with strict=False). 68 Rust tests green; smoke learner from on6's weights trained and saved. Cost: ~+25% per forward at width 32 (+10% at width 4; measured relative under load) -> fleet game cost ~3.4. Launch: runs/on7_launch.sh via `bash runs/arm_switch.sh on6 on7 3.4` after infra/push.sh (version-4 loader).",
+   "kill": "100k games: panel100 and Ham at on6's level and road/robber surprise unchanged",
+   "extend": "panel100 > 43 or Ham > 60 by 200k",
+   "notes": "Timing lesson: wall-clock and even CPU-time forward timings are meaningless while the Pig match saturates the box (the plain trunk measured 85-1050 us); compare relative costs in alternating runs. | 11:18 Nov 12 LAUNCHED as on7 from on6's weights (arm_switch on6 on7 3.4; image pushed 11:18 with the version-4 loader). The fleet keeper had hit its 14 h safety deadline at 10:11 and shut every box down (unnoticed while the sp4 batch was paused); keeper restarted 11:36, hunting capacity (InsufficientInstanceCapacity across the Zen pools again). | CHANGE POINT ~14:00 Nov 12 (on7 ~35k games): the mid-game horizon value label (midgame-horizon card) joins on7; later on7 numbers carry both changes. Before it: mid-game disagreement share >0.2 nats 4.75 -> 4.39% in 23k games (on6 flat at 4.7 over 477k); quiet probe vs on6: road surprise 0.124 -> 0.091, road_building 0.122 -> 0.089, end_turn 0.025 -> 0.019, robber 0.061 -> 0.071 (tile head still silent); value loss unchanged; Ham 59.0 at snap 60. | 14:19 Nov 12 DIVERGENCE at iteration 119 (43k games): a 680k-row shard burst (6 shards piled up during the 20-min learner outage) was added to the 600k replay in one call; wrapped indices wrote 80k rows twice and the fields resolved to different writers, misaligning policy targets against masks -> CE ~1e8 on every kind, value loss 4x, weights finite. Shards verified clean. FIX: Replay.add keeps only the newest `capacity` rows (az.py). RECOVERY: weights rebuilt from snap_000110/osnap_000110 (exact fp32; runs/ctnn_to_pt.py; re-export parity 0.0), relaunched 14:26 as on7 with fresh optimizer+replay and the horizon label on; first attempt archived as runs/on7-diverged-1419 (41k games: Ham 59-60.6, Gaz 53-55, panel 42.3). Games counter restarts; on4's shard-burst divergence likely had the same cause. | 14:31: the 14:26 relaunch was POISONED: actors had fetched the diverged model (published 14:17 as iteration 119) and their shards (tag 000119: target entropy 0.21, 2,500-3,400 decisions/game, unfinished games) passed the lag filter (only too-OLD shards are dropped). Clean relaunch 14:31: learner killed, S3 shards/on7 and control purged, actors cycled, relaunched from runs/on7-recover (iteration-110 weights). az.py now drops shards whose model_iter exceeds the learner's iteration (previous-launch shards); takes effect at the next learner start. Poisoned attempt archived as runs/on7-poisoned-1430 (replays deleted). | 14:40: data cleaned: first attempt renamed runs/on7a (board heads only, clean through iteration 118 / 41k games; iteration 119 dropped; checkpoints replaced by the iteration-110 rebuild); poisoned attempt deleted; on7 (relaunched 14:31) = heads + horizon label from the same weights. Compare on7 against on7a and on6.",
+   "runs": [
+    "on7a",
+    "on7"
+   ]
+  },
+  {
+   "id": "midgame-horizon",
+   "title": "Mid-game value label from short-horizon network-only playouts (the opening's decoupling applied to the rest of the game)",
+   "lane": "running",
+   "priority": 1,
+   "kind": "arm",
+   "hypothesis": "The mid-game value target is 75% game outcome + 25% search root value, averaged over siblings; a 15-point game's outcome is a noisy label for a turn-30 position. At placements the turn-5 horizon label beat the outcome (Spearman 0.72 vs 0.66) and, decoupled from the policy, gave the first value-head movement in a million games. An n-step bootstrap mid-game (MuZero/KataGo precedent) should do the same for the value function, which the search curve shows is the floor at ~3.5 pts.",
+   "indicator": "examples/midgame_horizon.rs + runs/midgame_horizon.py: correlation of each label (z, v1, q400, h3/h5/h10/h20 x 4/12 playouts) with the truth (64-playout win rate) by phase and on open positions (running: 150 games, 8 threads, started 12:53). Then value loss, Spearman, panel, Ham.",
+   "launch": "BUILT 13:00 Nov 12: SelfPlayConfig midgame_horizon_turns / midgame_playouts (selfplay::midgame_horizon_value: P playouts from each recorded mid-game position to +K turns, mover's value; NaN at placements), SelfPlayData.horizon -> binding 'horizon' -> shards 'horizon' -> az.py --midgame-horizon-turns/--midgame-playouts (actor settings in the control file) and --midgame-horizon-weight wh: value target = (1 - vq - wh) z + vq q + wh h where h exists. Needs an image push + actor cycle (old actors reject the new kwargs). Cost: K-turn playouts x P forwards per recorded position (~15 forwards per 5 turns); measured by the smoke run.",
+   "kill": "probe: if no horizon label beats the outcome's correlation with the truth on open positions, don't launch",
+   "extend": "value loss and Spearman move within 100k; panel > on7's",
+   "notes": "User intent: combine into on7's run once the probe picks K and P (attribution: on7 then carries board heads + mid-game label; note the change point on the board-heads card). | PROBE 13:50 Nov 12 (150 games, 2,141 positions, truth = 64-playout win rate; open positions 0.2-0.8, n=1,008): Pearson with truth: z 0.35, v1 0.74, q400 0.74, h3 0.75/0.77 (4/12 playouts), h5 0.76/0.80, h10 0.74/0.81, h20 0.70/0.81. Playouts matter more than horizon; 5 turns x 12 playouts chosen (~150 forwards/position, ~+35-40% actor cost; smoke: 4 playouts cost +13% at 5 turns). Caveat: truth and labels share the network's bias (bootstrap); the outcome keeps 25%. LAUNCHING into on7: --midgame-horizon-turns 5 --midgame-playouts 12 --midgame-horizon-weight 0.5 (value target 0.25 z + 0.25 q + 0.5 h). | Baseline for the label's effect: runs/on7a (same weights at launch, heads only) vs runs/on7 (heads + label). | 14:45 Nov 12: the 14:31 relaunch showed a fresh-optimizer shock: network entropy 0.39 -> 0.52 in the first iteration (Adam's empty moments + a changed value target = full-size steps all one way through the trunk), then flatter search targets (target entropy 0.33 -> 0.45, games 15% longer). Relaunched 14:45 from the same iteration-110 weights with --lr-warmup-steps 2000 and --midgame-horizon-ramp-games 30000. Watch: network/target entropy should stay ~0.39/0.33 through the first iterations.",
+   "runs": [
+    "on7"
+   ]
   }
  ]
 }

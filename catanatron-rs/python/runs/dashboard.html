@@ -21,11 +21,19 @@
   td:first-child, th:first-child { text-align: left; }
   .diff { background: #fff3c4; } .muted { color: #888; } .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; }
   .scroll { overflow-x: auto; } details { margin: 6px 0; } pre { background: #fff; border: 1px solid #ddd; padding: 6px; }
-  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .tiles .card h3 { margin-bottom: 6px; } .tiles .card .sub { font-size: 11px; color: #888; margin: -4px 0 6px; }
+  .tile { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; border-top: 1px solid #eee; font-variant-numeric: tabular-nums; }
+  .tile:first-of-type { border-top: 0; }
+  .tile .run { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .tile .v { font-size: 18px; font-weight: 600; } .tile .d { font-size: 11px; color: #666; white-space: nowrap; }
+  details.sec { margin: 12px 0; } details.sec > summary { cursor: pointer; font-size: 16px; font-weight: 600; padding: 4px 0; }
+  details.sec > summary .muted { font-weight: 400; font-size: 13px; } details.sec > .grid { margin-top: 6px; }
+  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } .tiles { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
-<nav class="nav"><a href="/">training</a> · <a href="/specialists">specialists</a> · <a href="/experiments">experiments</a> · <a href="/optimizations">optimizations</a></nav>
+<nav class="nav"><a href="/">training</a> · <a href="/specialists">specialists</a> · <a href="/specialists?batch=sp4">sp4</a> · <a href="/pig">pig</a> · <a href="/experiments">experiments</a> · <a href="/optimizations">optimizations</a></nav>
 <h1>Catan AZ training</h1>
 <div class="bar">
   <span>x axis:
@@ -36,18 +44,24 @@
   <span id="status" class="muted"></span>
 </div>
 <div id="runs"></div>
-<h2>Latest</h2><div class="scroll"><table id="latest"></table></div>
-<h2>Charts</h2><div class="grid" id="charts"></div>
-<h2>Board panel (vs held-out board specialists)</h2><div class="scroll" id="panel"></div>
+<h2>Headline</h2><div class="tiles" id="tiles"></div>
+<div class="scroll"><table id="latest"></table></div>
+<div id="charts"></div>
+<h2>Board panel (vs the 100 held-out board specialists, 400 games each)</h2><div class="scroll" id="panel"></div>
 <h2>Pig benchmark</h2><div class="scroll" id="pig"></div>
 <h2>Args vs <code>ac</code></h2><div class="scroll" id="args"></div>
 <script>
 const COLORS = ['#1f77b4','#d62728','#2ca02c','#ff7f0e','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f','#bcbd22'];
 const XLABEL = {iter: 'iteration', games: 'games', actor_hours: 'actor-hours'};
-// Each chart: list of [series key, legend suffix, dashed?]
+// Each chart: list of [series key, legend suffix, dash] where dash is true (long dash) or a dash array
+const PLACEMENTS = prefix => [[prefix + '0', ' 1st'], [prefix + '1', ' 2nd', [6, 4]], [prefix + '2', ' 3rd', [2, 3]], [prefix + '3', ' 4th', [6, 3, 2, 3]]];
 const CHARTS = [
-  {id: 'ham', title: 'Win rate vs Ham (%)', ham: true},
-  {id: 'panel', title: 'Win rate vs board specialists (panel mean, %)', panel: true},
+  {id: 'ham', title: 'Win rate vs Ham (%)', ham: true, ref: 'vs_ham'},
+  {id: 'gaz', title: 'Win rate vs Gaz (%)', ham: true, ref: 'vs_gaz'},
+  {id: 'panel', title: 'Win rate vs the 100 board specialists (panel mean, %)', panel: true},
+  {id: 'agree', title: 'Opening: first-pick agreement with the 100 experts (%)', track: 'agree'},
+  {id: 'spearman', title: 'Opening: value-head Spearman vs forced win rates (experts 0.80)', track: 'spearman'},
+  {id: 'regret', title: 'Opening: first-pick regret on expert boards, pts (policy solid, value dashed)', track: 'regret_pol', track2: 'regret_val'},
   {id: 'surprise', title: 'Search surprise KL(target || prior)', s: [['surprise', '']]},
   {id: 'loss_pi', title: 'Policy loss', s: [['loss_pi', '']]},
   {id: 'loss_v', title: 'Value loss', s: [['loss_v', '']]},
@@ -55,13 +69,30 @@ const CHARTS = [
   {id: 'entropy', title: 'Network entropy (solid) vs target entropy (dashed)', s: [['entropy', ' net'], ['target_entropy', ' target', true]]},
   {id: 'fp_gap', title: 'Fork-pair gap: open (solid), mid (dashed)', s: [['fp_open_gap', ' open'], ['fp_mid_gap', ' mid', true]]},
   {id: 'fp_alt', title: 'Fork-pair alt_p: open (solid), mid (dashed)', s: [['fp_open_alt_p', ' open'], ['fp_mid_alt_p', ' mid', true]]},
+  {id: 'fp_regret', title: 'Fork regret by placement: 1st solid, 2nd dashed, 3rd dotted, 4th dash-dot', s: PLACEMENTS('fp_regret_s')},
+  {id: 'fork_w', title: 'Regret-weighted fork weights by placement (same dashes; 1 = even)', s: PLACEMENTS('fork_w')},
   {id: 'dpg', title: 'Decisions per game', s: [['decisions_per_game', '']]},
   {id: 'endgame', title: 'Endgame share', s: [['endgame_share', '']]},
   {id: 'forks', title: 'Forks per iteration', s: [['forks', '']]},
   {id: 'shards', title: 'Remote shards per iteration', s: [['remote_shards', '']]},
   {id: 'lag', title: 'Remote lag (solid) / dropped (dashed)', s: [['remote_lag', ' lag'], ['remote_dropped', ' dropped', true]]},
   {id: 'gph', title: 'Games per hour (10-iter window)', s: [['games_per_hour', '']], noSmooth: true},
+  {id: 'sd_mid', title: 'Mid-game: share of decisions where search disagreed (>0.2 nats solid, >0.69 dashed), %', s: [['sd_mid_gt20', ' >0.2'], ['sd_mid_gt69', ' >0.69', true]], scale: 100},
+  {id: 'sd_open', title: 'Opening: share of placements where the horizon target disagreed with the prior (>0.2 solid, >0.69 dashed), %', s: [['sd_open_gt20', ' >0.2'], ['sd_open_gt69', ' >0.69', true]], scale: 100},
+  {id: 'lk', title: 'Mid-game policy loss by kind of action played (training rows; alternate kinds dashed)', s: [['lk_road', ' road'], ['lk_robber', ' robber', true], ['lk_settlement', ' settlement'], ['lk_city', ' city', true], ['lk_maritime', ' maritime'], ['lk_buy_dev', ' buy_dev', true], ['lk_knight', ' knight'], ['lk_end_turn', ' end_turn', true], ['lk_discard', ' discard'], ['lk_year_of_plenty', ' year_of_plenty', true], ['lk_monopoly', ' monopoly'], ['lk_road_building', ' road_building', true]]},
+  {id: 'sk', title: 'Mid-game search surprise by kind of action played, nats (new rows; alternate kinds dashed)', s: [['sk_road', ' road'], ['sk_robber', ' robber', true], ['sk_settlement', ' settlement'], ['sk_city', ' city', true], ['sk_maritime', ' maritime'], ['sk_buy_dev', ' buy_dev', true], ['sk_knight', ' knight'], ['sk_end_turn', ' end_turn', true], ['sk_discard', ' discard'], ['sk_year_of_plenty', ' year_of_plenty', true], ['sk_monopoly', ' monopoly'], ['sk_road_building', ' road_building', true]]},
 ];
+// Collapsible chart groups; open/closed state is remembered per section in localStorage.
+const SECTIONS = [
+  {id: 'strength', title: 'Strength', open: true, charts: ['ham', 'gaz', 'panel']},
+  {id: 'opening', title: 'Opening', open: true, charts: ['agree', 'spearman', 'regret', 'open_loss', 'fp_regret', 'fork_w', 'fp_gap', 'fp_alt', 'sd_open']},
+  {id: 'learning', title: 'Learning', open: false, charts: ['loss_pi', 'loss_v', 'entropy', 'surprise', 'sd_mid']},
+  {id: 'kinds', title: 'Mid-game by action kind', open: false, charts: ['lk', 'sk']},
+  {id: 'throughput', title: 'Throughput', open: false, charts: ['gph', 'dpg', 'endgame', 'forks', 'shards', 'lag']},
+];
+const SEC_KEY = 'catan-dash-sections';
+function loadSecState() { try { return JSON.parse(localStorage.getItem(SEC_KEY)) || {}; } catch (e) { return {}; } }
+function saveSecState(st) { try { localStorage.setItem(SEC_KEY, JSON.stringify(st)); } catch (e) {} }
 let baselines = [];
 let runList = [], selected = new Set(), cache = {}, charts = {}, colorOf = {};
 const $ = id => document.getElementById(id);
@@ -79,13 +110,13 @@ function smooth(ys, w) {
   return out;
 }
 
-function points(run, key, noSmooth) {
+function points(run, key, noSmooth, scale = 1) {
   const s = run.series, xs = s[xMode()], ys = s[key];
   if (!xs || !ys) return [];
   // series are downsampled to <=2000 points, so the smoothing window is in stored points
   const w = noSmooth ? 1 : Math.max(1, Math.round(+$('smooth').value * s.iter.length / Math.max(1, run.n)));
   const sy = smooth(ys, w), out = [];
-  for (let i = 0; i < xs.length; i++) if (xs[i] != null && sy[i] != null) out.push({x: xs[i], y: sy[i]});
+  for (let i = 0; i < xs.length; i++) if (xs[i] != null && sy[i] != null) out.push({x: xs[i], y: sy[i] * scale});
   return out;
 }
 
@@ -95,8 +126,17 @@ function datasetsFor(def) {
     const run = cache[name]; if (!run) continue;
     const col = colorOf[name];
     if (def.ham) {
-      const pts = run.vs_ham.filter(p => p[xMode()] != null).map(p => ({x: p[xMode()], y: p.pct}));
+      const pts = (run[def.ref] || []).filter(p => p[xMode()] != null).map(p => ({x: p[xMode()], y: p.pct}));
       if (pts.length) ds.push({label: name, data: pts, borderColor: col, backgroundColor: col, pointRadius: 2, borderWidth: 1.5});
+      continue;
+    }
+    if (def.track) {
+      const T = run.tracks || {};
+      for (const [key, dash, suf] of [[def.track, false, ''], [def.track2, true, ' value']]) {
+        if (!key) continue;
+        const pts = (T[key] || []).filter(p => p[xMode()] != null).map(p => ({x: p[xMode()], y: p.pct}));
+        if (pts.length) ds.push({label: name + suf, data: pts, borderColor: col, backgroundColor: col, borderDash: dash ? [5, 4] : [], pointRadius: 2, borderWidth: 1.5});
+      }
       continue;
     }
     if (def.panel) {
@@ -106,9 +146,9 @@ function datasetsFor(def) {
       continue;
     }
     for (const [key, suf, dash] of def.s) {
-      const pts = points(run, key, def.noSmooth);
+      const pts = points(run, key, def.noSmooth, def.scale || 1);
       if (pts.length) ds.push({label: name + suf, data: pts, borderColor: col, backgroundColor: col,
-        borderDash: dash ? [5, 4] : [], pointRadius: 0, borderWidth: 1.5});
+        borderDash: Array.isArray(dash) ? dash : dash ? [5, 4] : [], pointRadius: 0, borderWidth: 1.5});
     }
   }
   if (def.panel && ds.length) {
@@ -128,14 +168,34 @@ function datasetsFor(def) {
   return ds;
 }
 
+function buildSections() {
+  const st = loadSecState(), placed = new Set(SECTIONS.flatMap(s => s.charts));
+  const missing = CHARTS.filter(c => !placed.has(c.id)).map(c => c.id);
+  if (missing.length) throw new Error('charts without a section: ' + missing.join(', '));
+  for (const sec of SECTIONS) {
+    const d = document.createElement('details'); d.className = 'sec'; d.id = 'sec_' + sec.id;
+    d.open = sec.id in st ? !!st[sec.id] : sec.open;
+    d.innerHTML = `<summary>${sec.title} <span class="muted"></span></summary><div class="grid" id="grid_${sec.id}"></div>`;
+    d.addEventListener('toggle', () => {
+      const s2 = loadSecState(); s2[sec.id] = d.open; saveSecState(s2);
+      // charts drawn while the section was closed have a zero-size canvas
+      if (d.open) for (const id of sec.charts) if (charts[id]) { charts[id].resize(); charts[id].update('none'); }
+    });
+    $('charts').appendChild(d);
+  }
+}
+const sectionOf = id => SECTIONS.find(s => s.charts.includes(id));
+
 function drawCharts() {
-  for (const def of CHARTS) {
+  if (!$('charts').children.length) buildSections();
+  for (const sec of SECTIONS) for (const id of sec.charts) {
+    const def = CHARTS.find(c => c.id === id);
     const ds = datasetsFor(def);
     let card = $('card_' + def.id);
     if (!card) {
       card = document.createElement('div'); card.className = 'card'; card.id = 'card_' + def.id;
       card.innerHTML = `<h3>${def.title}</h3><div class="c"><canvas></canvas></div>`;
-      $('charts').appendChild(card);
+      $('grid_' + sec.id).appendChild(card);
       charts[def.id] = new Chart(card.querySelector('canvas'), {type: 'line', data: {datasets: []},
         options: {animation: false, parsing: false, normalized: true, maintainAspectRatio: false,
           interaction: {mode: 'nearest', intersect: false},
@@ -148,6 +208,39 @@ function drawCharts() {
     ch.options.scales.x.title.text = XLABEL[xMode()];
     ch.update('none');
   }
+  for (const sec of SECTIONS) {  // a section whose charts all lack data is hidden; the summary counts the charts shown
+    const shown = sec.charts.filter(id => $('card_' + id).style.display !== 'none').length;
+    const d = $('sec_' + sec.id);
+    d.style.display = shown ? '' : 'none';
+    d.querySelector('summary .muted').textContent = `(${shown} chart${shown === 1 ? '' : 's'})`;
+  }
+}
+
+// Headline tiles: one card per metric, one line per selected run with the latest value and the change since the previous reading.
+const lastTwo = pts => pts.length ? {value: pts[pts.length - 1].pct, prev: pts.length > 1 ? pts[pts.length - 2].pct : null,
+  iter: pts[pts.length - 1].iter, prev_iter: pts.length > 1 ? pts[pts.length - 2].iter : null} : null;
+const TILES = [
+  {title: 'Win rate vs Ham', sub: 'latest eval, Δ vs previous eval', d: 1, unit: '%', get: r => lastTwo(r.vs_ham)},
+  {title: 'Win rate vs Gaz', sub: 'latest eval, Δ vs previous eval', d: 1, unit: '%', get: r => lastTwo(r.vs_gaz || [])},
+  {title: '100-board panel mean', sub: 'latest panel line, Δ vs previous line', d: 1, unit: '%',
+    get: r => r.panel && r.panel_kind === 100 ? lastTwo(r.panel.iter.map((it, i) => ({iter: it, pct: r.panel.panel_mean[i]}))) : null},
+  {title: 'Expert first-pick agreement', sub: 'latest snapshot, Δ vs previous', d: 0, unit: '%', get: r => lastTwo((r.tracks || {}).agree || [])},
+  {title: 'Opening value Spearman', sub: 'vs forced win rates (experts 0.80)', d: 3, unit: '', get: r => lastTwo((r.tracks || {}).spearman || [])},
+  {title: 'Games per hour', sub: '10-iter window, Δ vs 10 iters earlier', d: 0, unit: '', get: r => r.latest.gph_pair},
+  {title: 'Value loss', sub: 'mean of last 10 iters, Δ vs the 10 before', d: 4, unit: '', get: r => r.latest.windows.loss_v},
+  {title: 'Search surprise', sub: 'mean of last 10 iters, Δ vs the 10 before', d: 4, unit: '', get: r => r.latest.windows.surprise},
+];
+
+function drawTiles() {
+  const names = [...selected].filter(n => cache[n]);
+  $('tiles').innerHTML = TILES.map(t => `<div class="card"><h3>${t.title}</h3><div class="sub">${t.sub}</div>` + names.map(n => {
+    const p = t.get(cache[n]), has = p && p.value != null;
+    const at = has && p.iter != null ? ` <span class="d">@${p.iter}</span>` : '';
+    const delta = has && p.prev != null ? (p.value - p.prev) : null;
+    const dtxt = delta == null ? '' : `<span class="d">${delta >= 0 ? '+' : '−'}${Math.abs(delta).toFixed(t.d)}${t.unit}</span>`;
+    const v = has ? (Math.abs(p.value) >= 1000 ? Math.round(p.value).toLocaleString() : p.value.toFixed(t.d)) + t.unit : '<span class="muted" style="font-size:12px;font-weight:400">no data</span>';
+    return `<div class="tile"><span class="run"><span class="sw" style="background:${colorOf[n]}"></span>${n}</span><span class="v">${v}</span>${dtxt}${at}</div>`;
+  }).join('') + '</div>').join('');
 }
 
 function drawLatest() {
@@ -180,14 +273,16 @@ function drawPanel() {
   for (const name of selected) {
     const r = cache[name]; if (!r || !r.panel) continue;
     const P = r.panel, i = P.iter.length - 1;
-    rows.push({label: `<span class="sw" style="background:${colorOf[name]}"></span>${name} @${P.iter[i]}`, games: P.games[i], mean: P.panel_mean[i],
-      boards: Object.fromEntries(r.panel_boards.map(b => [b, P['panel_' + b][i]]))});
+    const boards = r.panel_boards.map(b => [b, P['panel_' + b][i]]).filter(([, v]) => v != null).sort((a, b) => a[1] - b[1]);
+    rows.push({label: `<span class="sw" style="background:${colorOf[name]}"></span>${name} @${P.iter[i]}` + (r.panel_kind === 4 ? ' <span class="muted">(old 4-board panel)</span>' : '') +
+      ` · <a href="/panel?run=${encodeURIComponent(name)}">per-board view</a>`,
+      games: P.games[i], mean: P.panel_mean[i], n: boards.length, min: boards.length ? boards[0][1] : null, max: boards.length ? boards[boards.length - 1][1] : null,
+      worst: boards.slice(0, 3).map(([b, v]) => `${b} ${v.toFixed(1)}`).join(', '), best: boards.slice(-3).reverse().map(([b, v]) => `${b} ${v.toFixed(1)}`).join(', ')});
   }
-  for (const b of baselines) rows.push({label: '<span class="muted">baseline</span> ' + b.label, games: b.games, mean: b.mean, boards: b.boards});
-  if (!rows.length) { $('panel').innerHTML = '<span class="muted">no .panel files for the selected runs and no baselines yet</span>'; return; }
-  const B = [...new Set(rows.flatMap(r => Object.keys(r.boards)))].sort();
-  $('panel').innerHTML = `<table><tr><th>latest panel line</th><th>games</th><th>mean %</th>${B.map(b => `<th>${b}</th>`).join('')}</tr>` +
-    rows.map(r => `<tr><td>${r.label}</td><td>${fmt(r.games, 0)}</td><td>${fmt(r.mean, 1)}</td>${B.map(b => `<td>${fmt(r.boards[b], 1)}</td>`).join('')}</tr>`).join('') + '</table>';
+  for (const b of baselines) rows.push({label: '<span class="muted">baseline</span> ' + b.label, games: b.games, mean: b.mean, n: b.n_boards, min: b.min, max: b.max, worst: '', best: ''});
+  if (!rows.length) { $('panel').innerHTML = '<span class="muted">no .panel100 files for the selected runs and no baselines yet</span>'; return; }
+  $('panel').innerHTML = '<table><tr><th>latest panel line</th><th>games</th><th>mean %</th><th>boards</th><th>min</th><th>max</th><th>weakest boards</th><th>strongest boards</th></tr>' +
+    rows.map(r => `<tr><td>${r.label}</td><td>${fmt(r.games, 0)}</td><td>${fmt(r.mean, 1)}</td><td>${fmt(r.n, 0)}</td><td>${fmt(r.min, 1)}</td><td>${fmt(r.max, 1)}</td><td>${r.worst}</td><td>${r.best}</td></tr>`).join('') + '</table>';
 }
 
 function drawPig(pig) {
@@ -225,7 +320,7 @@ async function refresh() {
     const got = await Promise.all([...want].map(n => getJSON('/api/run?name=' + encodeURIComponent(n)).catch(e => ({error: String(e), name: n}))));
     for (const r of got) if (!r.error) cache[r.name] = r;
     baselines = await getJSON('/api/panel');
-    assignColors(); drawLatest(); drawPanel(); drawCharts(); drawArgs();
+    assignColors(); drawTiles(); drawLatest(); drawPanel(); drawCharts(); drawArgs();
     drawPig(await getJSON('/api/pig'));
     $('status').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · refresh every 60 s';
   } catch (e) { $('status').textContent = 'error: ' + e.message; }

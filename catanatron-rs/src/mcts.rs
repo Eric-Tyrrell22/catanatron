@@ -15,7 +15,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use crate::encoding::{ActionSpace, ObservationSpace};
+use crate::encoding::{ActionSpace, EncodeCache, ObservationSpace};
 use crate::game::Game;
 use crate::nn::{BatchScratch, PolicyValueNet, Scratch, MAX_BATCH};
 use crate::players::Player;
@@ -66,6 +66,12 @@ fn priors_from(act_space: &ActionSpace, game: &Game, logits: &[f32]) -> Vec<f32>
 
 /// Softmax of per-move logits (-inf = 0; all -inf = uniform).
 fn softmax(mut priors: Vec<f32>) -> Vec<f32> {
+    softmax_in_place(&mut priors);
+    priors
+}
+
+/// `softmax`, replacing the logits.
+fn softmax_in_place(priors: &mut [f32]) {
     let max = priors.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0;
     for p in priors.iter_mut() {
@@ -75,7 +81,6 @@ fn softmax(mut priors: Vec<f32>) -> Vec<f32> {
     for p in priors.iter_mut() {
         *p /= sum;
     }
-    priors
 }
 
 /// Runs the network on positions: legal-move priors and a value for the
@@ -83,10 +88,14 @@ fn softmax(mut priors: Vec<f32>) -> Vec<f32> {
 pub(crate) struct Evaluator {
     net: Arc<PolicyValueNet>,
     spaces: Option<(ObservationSpace, ActionSpace)>,
+    /// Derived board quantities shared by the positions encoded.
+    cache: EncodeCache,
     obs_nz: Vec<(u32, f32)>,
     /// Action slot per playable action (`u32::MAX` = not encodable).
     slots: Vec<u32>,
     logits: Vec<f32>,
+    /// The last evaluation's priors (`evaluate` hands out a view of them).
+    priors: Vec<f32>,
     scratch: Scratch,
     /// Per batch position: sparse observation, logits.
     batch_nz: Vec<Vec<(u32, f32)>>,
@@ -100,9 +109,11 @@ impl Evaluator {
         Evaluator {
             net,
             spaces: None,
+            cache: EncodeCache::default(),
             obs_nz: Vec::new(),
             slots: Vec::new(),
             logits: Vec::new(),
+            priors: Vec::new(),
             scratch: Scratch::default(),
             batch_nz: vec![Vec::new(); MAX_BATCH],
             batch_logits: vec![Vec::new(); MAX_BATCH],
@@ -121,24 +132,28 @@ impl Evaluator {
     }
 
     /// (softmax priors over `game.playable_actions`, value for the mover).
-    pub(crate) fn evaluate(&mut self, game: &Game) -> (Vec<f32>, f32) {
+    /// The priors are a view into this evaluator, valid until its next use.
+    pub(crate) fn evaluate(&mut self, game: &Game) -> (&[f32], f32) {
         self.spaces(game);
         let (obs_space, act_space) = self.spaces.as_ref().unwrap();
         let s = &game.state;
-        let n = obs_space.encode_sparse_into(s, s.current_color(), &mut self.obs_nz);
+        let n = obs_space.encode_sparse_cached(s, s.current_color(), &mut self.obs_nz, &mut self.cache);
         // Only the legal moves' logits are needed.
         self.slots.clear();
         self.slots.extend(game.playable_actions.iter().map(|a| act_space.encode(s, a).map_or(u32::MAX, |i| i as u32)));
         let value = self.net.forward_sparse_for(&self.obs_nz[..n], &self.slots, &mut self.scratch, &mut self.logits);
         self.evals += 1;
-        (softmax(self.logits.clone()), value)
+        self.priors.clear();
+        self.priors.extend_from_slice(&self.logits);
+        softmax_in_place(&mut self.priors);
+        (&self.priors, value)
     }
 
     /// The network's observation of `game` from `me`'s seat (sparse).
     fn observe(&mut self, game: &Game, me: Color) -> Vec<(u32, f32)> {
         self.spaces(game);
         let mut nz = Vec::new();
-        let n = self.spaces.as_ref().unwrap().0.encode_sparse_into(&game.state, me, &mut nz);
+        let n = self.spaces.as_ref().unwrap().0.encode_sparse_cached(&game.state, me, &mut nz, &mut self.cache);
         nz.truncate(n);
         nz
     }
@@ -157,7 +172,7 @@ impl Evaluator {
         for chunk in games.chunks(MAX_BATCH) {
             let mut lens = [0; MAX_BATCH];
             for (b, g) in chunk.iter().enumerate() {
-                lens[b] = obs_space.encode_sparse_into(&g.state, g.state.current_color(), &mut self.batch_nz[b]);
+                lens[b] = obs_space.encode_sparse_cached(&g.state, g.state.current_color(), &mut self.batch_nz[b], &mut self.cache);
             }
             let xs: Vec<&[(u32, f32)]> = self.batch_nz[..chunk.len()].iter().zip(lens).map(|(nz, n)| &nz[..n]).collect();
             self.net.forward_batch(&xs, &mut self.batch, &mut self.batch_logits, &mut values);
@@ -198,7 +213,7 @@ impl Player for NetPlayer {
         }
         let (priors, _) = self.eval.evaluate(game);
         let pick = match &mut self.sampler {
-            Some(rng) => sample_index(&priors, rng),
+            Some(rng) => sample_index(priors, rng),
             None => (0..priors.len()).max_by(|&a, &b| priors[a].total_cmp(&priors[b])).unwrap(),
         };
         game.playable_actions[pick]
@@ -378,7 +393,7 @@ pub fn immediate_win(game: &Game) -> Option<usize> {
         if is_stochastic(a, game) {
             return false;
         }
-        let mut g = game.copy_without_history();
+        let mut g = game.copy_for_step();
         g.execute_unchecked(*a, None).is_ok() && g.winning_color() == Some(me)
     })
 }
@@ -467,17 +482,46 @@ fn select_in(nodes: &[Node], id: usize, cfg: &MctsConfig) -> usize {
     best.1
 }
 
-fn expand_in(nodes: &mut [Node], id: usize, priors: Vec<f32>, value: f32) {
+fn expand_in(nodes: &mut [Node], id: usize, priors: &[f32], value: f32) {
     let node = &mut nodes[id];
     node.edges = node
         .game
         .playable_actions
         .iter()
         .zip(priors)
-        .map(|(&action, prior)| Edge { action, prior, net_prior: prior, visits: 0, value_sum: [0.0; 4], child: Child::Unvisited })
+        .map(|(&action, &prior)| Edge { action, prior, net_prior: prior, visits: 0, value_sum: [0.0; 4], child: Child::Unvisited })
         .collect();
     node.expanded = true;
     node.value = value;
+}
+
+/// Creates node `id`'s edges from `priors` (`MctsPlayer::search` trees);
+/// `value` is the network's for the mover. With `prune_mass` < 1, sets the
+/// prior floor below which moves are not selected under the root.
+fn expand_node(nodes: &mut [Node], prune_mass: f32, id: usize, priors: &[f32], value: Option<f32>) {
+    let node = &mut nodes[id];
+    node.edges = node
+        .game
+        .playable_actions
+        .iter()
+        .zip(priors)
+        .map(|(&action, &prior)| Edge { action, prior, net_prior: prior, visits: 0, value_sum: [0.0; 4], child: Child::Unvisited })
+        .collect();
+    node.expanded = true;
+    node.value = value.unwrap_or(0.0);
+    node.prior_floor = 0.0;
+    if prune_mass < 1.0 && node.edges.len() > 1 {
+        let mut p: Vec<f32> = node.edges.iter().map(|e| e.net_prior).collect();
+        p.sort_unstable_by(|a, b| b.total_cmp(a));
+        let mut mass = 0.0;
+        for &x in &p {
+            mass += x;
+            node.prior_floor = x;
+            if mass >= prune_mass {
+                break;
+            }
+        }
+    }
 }
 
 fn new_node_in(nodes: &mut Vec<Node>, game: Game) -> usize {
@@ -505,7 +549,7 @@ fn shared_simulation(
         }
         if !nodes[id].expanded {
             if nodes[id].game.playable_actions.len() == 1 {
-                expand_in(&mut nodes, id, vec![1.0], 0.0);
+                expand_in(&mut nodes, id, &[1.0], 0.0);
             } else {
                 // Evaluate outside the lock (another thread may expand it
                 // meanwhile: then its expansion stands, our value still counts).
@@ -536,7 +580,7 @@ fn shared_simulation(
                 continue;
             }
         }
-        let mut g = nodes[id].game.copy_without_history();
+        let mut g = nodes[id].game.copy_for_step();
         drop(nodes);
         let outcome = if stochastic {
             g.state.rng = Rng::new(rng.next_u64());
@@ -786,33 +830,6 @@ impl MctsPlayer {
         self.nodes.len() - 1
     }
 
-    /// Creates edges from priors; `value` is the network's for the mover.
-    fn expand_with(&mut self, id: usize, priors: Vec<f32>, value: Option<f32>) {
-        let node = &mut self.nodes[id];
-        node.edges = node
-            .game
-            .playable_actions
-            .iter()
-            .zip(priors)
-            .map(|(&action, prior)| Edge { action, prior, net_prior: prior, visits: 0, value_sum: [0.0; 4], child: Child::Unvisited })
-            .collect();
-        node.expanded = true;
-        node.value = value.unwrap_or(0.0);
-        node.prior_floor = 0.0;
-        if self.config.prune_mass < 1.0 && node.edges.len() > 1 {
-            let mut p: Vec<f32> = node.edges.iter().map(|e| e.net_prior).collect();
-            p.sort_unstable_by(|a, b| b.total_cmp(a));
-            let mut mass = 0.0;
-            for &x in &p {
-                mass += x;
-                node.prior_floor = x;
-                if mass >= self.config.prune_mass {
-                    break;
-                }
-            }
-        }
-    }
-
     /// The edge to follow from node `id`: PUCT, with the below-root pruning
     /// (`prune_mass`, `q_prune_margin`) when `id` isn't the search's root.
     fn select(&self, id: usize, is_root: bool) -> usize {
@@ -852,7 +869,7 @@ impl MctsPlayer {
             if let Child::Node(c) = self.nodes[id].edges[e].child {
                 return Ok(c);
             }
-            let mut g = self.nodes[id].game.copy_without_history();
+            let mut g = self.nodes[id].game.copy_for_step();
             g.execute_unchecked(action, None)?;
             let c = self.new_node(g);
             self.nodes[id].edges[e].child = Child::Node(c);
@@ -872,7 +889,7 @@ impl MctsPlayer {
             }
         }
         // Sample an outcome with fresh randomness.
-        let mut g = self.nodes[id].game.copy_without_history();
+        let mut g = self.nodes[id].game.copy_for_step();
         g.state.rng = Rng::new(self.rng.next_u64());
         let mut deck = g.state.dev_deck;
         self.rng.shuffle(&mut deck);
@@ -920,7 +937,7 @@ impl MctsPlayer {
                     self.nodes[id].visits += 1;
                     return Ok(Leaf::Eval(id));
                 }
-                self.expand_with(id, vec![1.0], None);
+                expand_node(&mut self.nodes, self.config.prune_mass, id, &[1.0], None);
             }
             if self.nodes[id].game.is_over() {
                 return Ok(Leaf::Value(terminal_values(&self.nodes[id].game, &self.config.utility)));
@@ -1012,13 +1029,18 @@ impl MctsPlayer {
         (edges, root.value)
     }
 
-    /// One simulation from the root, optionally through root edge `first`.
-    fn simulate(&mut self, root: usize, first: Option<usize>, path: &mut Vec<(usize, usize)>) -> Result<(), String> {
+    /// One simulation from the root, optionally through root edge `first`;
+    /// with `noise`, an expansion of the root mixes in the Dirichlet noise
+    /// (`MctsConfig::root_noise`).
+    fn simulate(&mut self, root: usize, first: Option<usize>, path: &mut Vec<(usize, usize)>, noise: bool) -> Result<(), String> {
         let v = match self.descend_from(root, first, 0.0, path)? {
             Leaf::Value(v) => v,
             Leaf::Eval(id) => {
                 let (priors, value) = self.eval.evaluate(&self.nodes[id].game);
-                self.expand_with(id, priors, Some(value));
+                expand_node(&mut self.nodes, self.config.prune_mass, id, priors, Some(value));
+                if noise && id == root && self.config.root_noise > 0.0 {
+                    self.add_root_noise(root);
+                }
                 let g = &self.nodes[id].game;
                 spread(g, g.state.current_color(), value)
             }
@@ -1031,7 +1053,7 @@ impl MctsPlayer {
     /// edge (see `MctsConfig::gumbel_m`).
     fn gumbel_search(&mut self, root: usize, sims: usize) -> Result<usize, String> {
         let mut path = Vec::new();
-        self.simulate(root, None, &mut path)?; // expands the root
+        self.simulate(root, None, &mut path, false)?; // expands the root
         let n = self.nodes[root].edges.len();
         if n == 0 {
             return Err("root has no moves".into());
@@ -1057,7 +1079,7 @@ impl MctsPlayer {
                     if left == 0 {
                         break;
                     }
-                    self.simulate(root, Some(e), &mut path)?;
+                    self.simulate(root, Some(e), &mut path, false)?;
                     left -= 1;
                 }
             }
@@ -1078,7 +1100,7 @@ impl MctsPlayer {
         let root_game = self.determinize(game);
         let root = self.new_node(root_game);
         let (priors, value) = self.eval.evaluate(&self.nodes[root].game);
-        self.expand_with(root, priors, Some(value));
+        expand_node(&mut self.nodes, self.config.prune_mass, root, priors, Some(value));
         let sims = match self.config.placement_sims {
             p if p > 0 && game.state.is_initial_build_phase => p,
             _ => self.config.simulations,
@@ -1189,12 +1211,26 @@ impl MctsPlayer {
             return Ok(self.nodes[root].edges.iter().map(|e| e.visits).collect());
         }
         let k_max = self.config.batch.max(1) as usize;
-        let vl = if k_max > 1 { VIRTUAL_LOSS } else { 0.0 };
+        let deadline = (self.config.time_limit_ms > 0)
+            .then(|| std::time::Instant::now() + std::time::Duration::from_millis(self.config.time_limit_ms));
+        if k_max == 1 {
+            // Plain sequential search: one simulation at a time, nothing
+            // allocated per simulation beyond the tree itself.
+            let mut path = Vec::new();
+            let mut done = 0;
+            while match deadline {
+                Some(d) => done == 0 || std::time::Instant::now() < d,
+                None => done < sims,
+            } {
+                self.simulate(root, None, &mut path, true)?;
+                done += 1;
+            }
+            return Ok(self.nodes[root].edges.iter().map(|e| e.visits).collect());
+        }
+        let vl = VIRTUAL_LOSS;
         let mut paths = vec![Vec::new(); k_max];
         let mut leaves = Vec::with_capacity(k_max);
         let mut done = 0;
-        let deadline = (self.config.time_limit_ms > 0)
-            .then(|| std::time::Instant::now() + std::time::Duration::from_millis(self.config.time_limit_ms));
         while match deadline {
             Some(d) => done == 0 || std::time::Instant::now() < d,
             None => done < sims,
@@ -1213,14 +1249,17 @@ impl MctsPlayer {
             ids.dedup();
             let results = match ids.len() {
                 0 => Vec::new(),
-                1 => vec![self.eval.evaluate(&self.nodes[ids[0]].game)],
+                1 => {
+                    let (priors, value) = self.eval.evaluate(&self.nodes[ids[0]].game);
+                    vec![(priors.to_vec(), value)]
+                }
                 _ => {
                     let games: Vec<&Game> = ids.iter().map(|&id| &self.nodes[id].game).collect();
                     self.eval.evaluate_batch(&games)
                 }
             };
             for (&id, (priors, value)) in ids.iter().zip(results) {
-                self.expand_with(id, priors, Some(value));
+                expand_node(&mut self.nodes, self.config.prune_mass, id, &priors, Some(value));
                 if id == root && self.config.root_noise > 0.0 {
                     self.add_root_noise(root);
                 }
@@ -1495,7 +1534,7 @@ fn lf_simulation(
                 } else {
                     node.visits.fetch_add(1, Ordering::Relaxed);
                     let (priors, v) = eval.evaluate(&node.game);
-                    lf_expand(node, &priors, v);
+                    lf_expand(node, priors, v);
                     break spread(&node.game, node.game.state.current_color(), v);
                 }
             }
@@ -1522,7 +1561,7 @@ fn lf_simulation(
                         lf_undo(arena, path, vl);
                         return Ok(false);
                     }
-                    let mut g = node.game.copy_without_history();
+                    let mut g = node.game.copy_for_step();
                     g.execute_unchecked(edge.action, None)?;
                     let c = arena.push(LfNode::new(g))?;
                     // If another thread linked a child first, use theirs.
@@ -1530,7 +1569,7 @@ fn lf_simulation(
                 }
             },
             Some(slots) => {
-                let mut g = node.game.copy_without_history();
+                let mut g = node.game.copy_for_step();
                 g.state.rng = Rng::new(rng.next_u64());
                 let mut deck = g.state.dev_deck;
                 rng.shuffle(&mut deck);
@@ -1604,7 +1643,7 @@ impl MctsPlayer {
             let root = arena.get(0);
             root.state.store(EXPANDING, Ordering::Relaxed);
             let (priors, v) = self.eval.evaluate(&root.game);
-            lf_expand(root, &priors, v);
+            lf_expand(root, priors, v);
         }
         let sims = match self.config.placement_sims {
             p if p > 0 && game.state.is_initial_build_phase => p,

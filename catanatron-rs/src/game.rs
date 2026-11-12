@@ -151,6 +151,21 @@ impl Game {
         }
     }
 
+    /// `copy_without_history` for a copy that is advanced right away: the
+    /// playable actions are left empty (with room for a typical list)
+    /// instead of copied, since `execute_unchecked` regenerates them.
+    pub(crate) fn copy_for_step(&self) -> Game {
+        Game {
+            seed: self.seed,
+            vps_to_win: self.vps_to_win,
+            turns_limit: self.turns_limit,
+            state: self.state.clone(),
+            playable_actions: Vec::with_capacity(32),
+            history: Vec::new(),
+            record_history: false,
+        }
+    }
+
     /// True if `action` may be taken now: it is among the playable actions,
     /// or it is a well-formed trade offer by the player whose turn it is
     /// after rolling.

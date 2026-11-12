@@ -240,6 +240,21 @@ impl DiceDeck {
     /// Probability of each total (index = total, 2..=12) for the next roll
     /// by `seat` among `num_players`.
     pub fn probabilities(&self, seat: usize, num_players: usize) -> [f32; 13] {
+        let (d, base) = self.base_weights();
+        d.seat_probabilities(&base, seat, num_players)
+    }
+
+    /// `probabilities` for two seats at once: the deck's weights are
+    /// counted once and each seat's 7 weighting and normalisation applied
+    /// to a copy, the same operations as two separate calls.
+    pub fn probabilities_pair(&self, seats: [usize; 2], num_players: usize) -> [[f32; 13]; 2] {
+        let (d, base) = self.base_weights();
+        seats.map(|seat| d.seat_probabilities(&base, seat, num_players))
+    }
+
+    /// The deck the next roll is drawn from and each total's weight before
+    /// the roller's 7 adjustment and normalisation.
+    fn base_weights(&self) -> (DiceDeck, [f32; 13]) {
         let d = self.next_deck();
         let mut count = [0u32; 13];
         for (a, b) in d.remaining() {
@@ -252,8 +267,15 @@ impl DiceDeck {
                 w[t] *= (1.0 - OPENHEX_RECENCY_PENALTY * d.recent_count(t as u8) as f32).max(0.0);
             }
         }
-        if d.openhex && w[7] > 0.0 {
-            w[7] *= d.seven_multiplier(seat, num_players);
+        (d, w)
+    }
+
+    /// `base` (from `base_weights` of this deck) adjusted for `seat` rolling
+    /// and normalised.
+    fn seat_probabilities(&self, base: &[f32; 13], seat: usize, num_players: usize) -> [f32; 13] {
+        let mut w = *base;
+        if self.openhex && w[7] > 0.0 {
+            w[7] *= self.seven_multiplier(seat, num_players);
         }
         let total: f32 = w.iter().sum();
         assert!(total > 0.0, "some total can always be rolled");
@@ -299,8 +321,18 @@ impl DiceDeck {
         while p[total as usize] == 0.0 {
             total -= 1; // rounding at the very top of the range
         }
-        let idx: Vec<usize> = (0..self.len as usize).filter(|&i| self.left[i] / 6 + self.left[i] % 6 + 2 == total).collect();
-        let i = idx[rng.below(idx.len())];
+        // One of the remaining cards of that total, uniformly.
+        let matches = |c: &u8| c / 6 + c % 6 + 2 == total;
+        let count = self.left[..self.len as usize].iter().filter(|c| matches(c)).count();
+        let k = rng.below(count);
+        let i = self.left[..self.len as usize].iter().position({
+            let mut seen = 0;
+            move |c| {
+                let hit = matches(c) && seen == k;
+                seen += matches(c) as usize;
+                hit
+            }
+        }).expect("a card of the chosen total remains");
         let roll = self.take(i);
         self.record(total, seat);
         roll

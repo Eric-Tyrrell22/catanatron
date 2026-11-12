@@ -17,3 +17,6 @@
 *.pt
 # secrets
 /python/openhex_keys.json
+
+# Pig match daemon binary: built locally against the separate colonizing-pig checkout, never shipped
+/bench/pig/pigd

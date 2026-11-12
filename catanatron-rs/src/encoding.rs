@@ -11,7 +11,7 @@
 
 use crate::board::{BuildingType, MAX_NODES};
 use crate::map::CatanMap;
-use crate::state::{DiceDeck, State, MAX_PLAYERS};
+use crate::state::{DiceDeck, PerSeat, State, MAX_PLAYERS};
 use crate::types::*;
 
 /// Shape of one slot in the action space. Victims/partners are relative
@@ -67,16 +67,28 @@ pub struct ActionSpace {
 
 const ROBBER_VICTIMS: usize = MAX_PLAYERS; // none + 3 relative seats
 
-fn yop_options() -> Vec<(Resource, Option<Resource>)> {
-    let mut v = Vec::new();
-    for i in 0..5 {
-        for j in i..5 {
-            v.push((RESOURCES[i], Some(RESOURCES[j])));
+/// Year of Plenty slots: the 15 resource pairs (i <= j), then 5 singles.
+const YOP_OPTIONS: [(Resource, Option<Resource>); 20] = {
+    let mut v = [(RESOURCES[0], None); 20];
+    let mut k = 0;
+    let mut i = 0;
+    while i < 5 {
+        let mut j = i;
+        while j < 5 {
+            v[k] = (RESOURCES[i], Some(RESOURCES[j]));
+            k += 1;
+            j += 1;
         }
+        i += 1;
     }
-    v.extend(RESOURCES.iter().map(|&r| (r, None)));
+    let mut r = 0;
+    while r < 5 {
+        v[k] = (RESOURCES[r], None);
+        k += 1;
+        r += 1;
+    }
     v
-}
+};
 
 fn maritime_offset(give: Resource, rate: u8, get: Resource) -> usize {
     let rate_i = match rate {
@@ -117,7 +129,7 @@ impl ActionSpace {
         slots.push(ActionSlot::BuyDevelopmentCard);
         slots.push(ActionSlot::PlayKnight);
         let o_yop = slots.len();
-        slots.extend(yop_options().into_iter().map(|(a, b)| ActionSlot::PlayYearOfPlenty(a, b)));
+        slots.extend(YOP_OPTIONS.iter().map(|&(a, b)| ActionSlot::PlayYearOfPlenty(a, b)));
         slots.push(ActionSlot::PlayRoadBuilding);
         let o_monopoly = slots.len();
         slots.extend(RESOURCES.iter().map(|&r| ActionSlot::PlayMonopoly(r)));
@@ -199,7 +211,7 @@ impl ActionSpace {
                     Some(b) if b < a => (b, Some(a)),
                     _ => (a, b),
                 };
-                self.o_yop + yop_options().iter().position(|&o| o == (a, b))?
+                self.o_yop + YOP_OPTIONS.iter().position(|&o| o == (a, b))?
             }
             ActionKind::PlayRoadBuilding => self.o_monopoly - 1,
             ActionKind::PlayMonopoly(r) => self.o_monopoly + r.idx(),
@@ -328,7 +340,112 @@ pub struct ObservationSpace {
     /// Land node => its port, if any (0..5 resources, 5 = 3:1). Fixed per map.
     node_port: Vec<Option<usize>>,
     land_edges: Vec<usize>,
+    /// With `spots`: each land node's production pips by resource (weight
+    /// 6, as the block reports them) for every robber position, indexed
+    /// `[robber land tile][node][resource]`. Fixed per map: the robber's
+    /// tile is all that changes them (`spot_pips`).
+    spot_pips: Vec<f32>,
     size: usize,
+}
+
+/// Entries of the spots block per node per robber position.
+const PIPS: usize = 5;
+
+/// Reusable state for the encoder, kept by a caller that encodes many
+/// positions of one game: the road-distance maps (`road_distances`, the
+/// costliest part of the spots and reach blocks) of the last few boards
+/// seen, found again by the board's roads and buildings. The leaves of a
+/// search mostly share their board with the root, so most lookups hit.
+/// Only speed depends on it: the observation is the same with or without.
+#[derive(Default)]
+pub struct EncodeCache {
+    entries: Vec<DistanceEntry>,
+    /// Next entry to replace (round robin).
+    next: usize,
+}
+
+/// `EncodeCache` entries kept.
+const DISTANCE_ENTRIES: usize = 8;
+
+/// The inputs of `road_distances` as bytes: each edge's road owner, then
+/// each node's building, then the cap and the map's node and edge counts
+/// (its topology, which maps of one type share). Multiples of 8 bytes, for
+/// hashing.
+const BOARD_KEY: usize = (crate::board::MAX_EDGES + MAX_NODES + 3).div_ceil(8) * 8;
+type BoardKey = [u8; BOARD_KEY];
+
+struct DistanceEntry {
+    hash: u64,
+    key: BoardKey,
+    /// Per seat.
+    dists: [[u8; MAX_NODES]; MAX_PLAYERS],
+}
+
+fn board_key(b: &crate::board::Board, cap: u8) -> (BoardKey, u64) {
+    let mut key = [0u8; BOARD_KEY];
+    for (k, r) in key.iter_mut().zip(&b.roads) {
+        *k = r.map_or(0, |c| c as u8 + 1);
+    }
+    for (k, n) in key[crate::board::MAX_EDGES..].iter_mut().zip(&b.buildings) {
+        *k = n.map_or(0, |(c, kind)| 1 + 2 * c as u8 + (kind == BuildingType::City) as u8);
+    }
+    let tail = &mut key[crate::board::MAX_EDGES + MAX_NODES..];
+    tail[0] = cap;
+    tail[1] = b.map.num_nodes as u8;
+    tail[2] = b.map.edges.len() as u8;
+    let mut h = 0x9E37_79B9_7F4A_7C15u64;
+    for word in key.chunks_exact(8) {
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(word.try_into().unwrap())).wrapping_mul(0x517C_C1B7_2722_0A95);
+    }
+    (key, h)
+}
+
+impl EncodeCache {
+    /// `road_distances(b, color, cap)` for every seated color, indexed by
+    /// seat, computed once per board.
+    fn distances(&mut self, s: &State, cap: u8) -> &[[u8; MAX_NODES]; MAX_PLAYERS] {
+        let (key, hash) = board_key(&s.board, cap);
+        if let Some(k) = self.entries.iter().position(|e| e.hash == hash && e.key == key) {
+            return &self.entries[k].dists;
+        }
+        let mut dists = [[0u8; MAX_NODES]; MAX_PLAYERS];
+        fill_distances(s, cap, &mut dists);
+        let entry = DistanceEntry { hash, key, dists };
+        let k = if self.entries.len() < DISTANCE_ENTRIES {
+            self.entries.push(entry);
+            self.entries.len() - 1
+        } else {
+            let k = self.next;
+            self.entries[k] = entry;
+            self.next = (k + 1) % DISTANCE_ENTRIES;
+            k
+        };
+        &self.entries[k].dists
+    }
+}
+
+/// `road_distances` of every seated color at `cap`, by seat: from `cache`
+/// (computed once per board) when one is given, else into `local`.
+fn distances<'a>(
+    s: &State,
+    cap: u8,
+    cache: Option<&'a mut EncodeCache>,
+    local: &'a mut [[u8; MAX_NODES]; MAX_PLAYERS],
+) -> &'a [[u8; MAX_NODES]; MAX_PLAYERS] {
+    match cache {
+        Some(c) => c.distances(s, cap),
+        None => {
+            fill_distances(s, cap, local);
+            local
+        }
+    }
+}
+
+/// `road_distances` of every seated color, by seat, into `out`.
+fn fill_distances(s: &State, cap: u8, out: &mut [[u8; MAX_NODES]; MAX_PLAYERS]) {
+    for (seat, &c) in s.colors.iter().enumerate() {
+        out[seat] = road_distances(&s.board, c, cap);
+    }
 }
 
 /// With balanced dice: share of each sum's (2..=12) combinations still in the
@@ -470,6 +587,25 @@ fn extras_len(map: &CatanMap) -> usize {
     map.land_tiles.len() * EXTRA_PER_TILE + MAX_PLAYERS + 2 * (MAX_PLAYERS - 1)
 }
 
+/// Length of the observation of `map` with features `f`.
+fn layout_size(map: &CatanMap, f: ObsFeatures) -> usize {
+    let num_land_nodes = map.land_nodes.iter().filter(|&&x| x).count();
+    let land_edges = (0..map.edges.len()).filter(|&i| map.land_edge[i]).count();
+    num_land_nodes * PER_NODE
+        + land_edges * PER_EDGE
+        + map.land_tiles.len() * PER_TILE
+        + MAX_PLAYERS * PER_PLAYER
+        + PRIVATE
+        + GLOBAL
+        + if f.dice { DICE_FEATURES } else { 0 }
+        + if f.dice_history { DICE_HISTORY_FEATURES } else { 0 }
+        + if f.hands { HAND_FEATURES } else { 0 }
+        + if f.devs { DEV_FEATURES } else { 0 }
+        + if f.extras { extras_len(map) } else { 0 }
+        + if f.spots { spots_len(num_land_nodes) } else { 0 }
+        + if f.reach { reach_len(num_land_nodes) } else { 0 }
+}
+
 fn starting_dev_count(d: DevCard) -> u32 {
     match d {
         DevCard::Knight => 14,
@@ -507,9 +643,8 @@ impl ObservationSpace {
                 if f.dice_history && !f.dice {
                     continue;
                 }
-                let space = ObservationSpace::with_features(map, f);
-                if space.len() == obs_size {
-                    return space;
+                if layout_size(map, f) == obs_size {
+                    return ObservationSpace::with_features(map, f);
                 }
             }
         }
@@ -553,20 +688,28 @@ impl ObservationSpace {
                 }
             }
         }
-        let size = num_land_nodes * PER_NODE
-            + land_edges.len() * PER_EDGE
-            + map.land_tiles.len() * PER_TILE
-            + MAX_PLAYERS * PER_PLAYER
-            + PRIVATE
-            + GLOBAL
-            + if dice { DICE_FEATURES } else { 0 }
-            + if dice_history { DICE_HISTORY_FEATURES } else { 0 }
-            + if hands { HAND_FEATURES } else { 0 }
-            + if devs { DEV_FEATURES } else { 0 }
-            + if extras { extras_len(map) } else { 0 }
-            + if spots { spots_len(num_land_nodes) } else { 0 }
-            + if reach { reach_len(num_land_nodes) } else { 0 };
-        ObservationSpace { dice, dice_history, hands, devs, extras, spots, reach, num_land_nodes, node_port, land_edges, size }
+        let size = layout_size(map, f);
+        // Every node's pips for every robber position, as the spots block
+        // computes them (`node_pips` with the robber's tile skipped).
+        let mut spot_pips = Vec::new();
+        if spots {
+            for &ti in &map.land_tiles {
+                let robber = map.tiles[ti].coordinate;
+                for nd in 0..num_land_nodes {
+                    let mut pips = [0.0f32; PIPS];
+                    node_pips(map, robber, nd as NodeId, 6.0, &mut pips);
+                    spot_pips.extend_from_slice(&pips);
+                }
+            }
+        }
+        ObservationSpace { dice, dice_history, hands, devs, extras, spots, reach, num_land_nodes, node_port, land_edges, spot_pips, size }
+    }
+
+    /// The spots block's pips of every node (`PIPS` each, node-major) with
+    /// the robber at `robber`.
+    fn spot_pips(&self, map: &CatanMap, robber: Coordinate) -> &[f32] {
+        let t = map.land_tiles.iter().position(|&ti| map.tiles[ti].coordinate == robber).expect("the robber is on a land tile");
+        &self.spot_pips[t * self.num_land_nodes * PIPS..][..self.num_land_nodes * PIPS]
     }
 
     pub fn len(&self) -> usize {
@@ -585,7 +728,7 @@ impl ObservationSpace {
 
     /// Writes the observation for `me` into `out` (length `len()`).
     pub fn encode_into(&self, s: &State, me: Color, out: &mut [f32]) {
-        self.write(s, me, &mut Dense { out, i: 0 });
+        self.write(s, me, &mut Dense { out, i: 0 }, None);
     }
 
     /// Writes the nonzero entries of the observation for `me` into `nz` as
@@ -596,24 +739,38 @@ impl ObservationSpace {
             nz.resize(self.size, (0, 0.0));
         }
         let mut sink = Sparse { out: &mut nz[..], i: 0, n: 0 };
-        self.write(s, me, &mut sink);
+        self.write(s, me, &mut sink, None);
+        sink.n
+    }
+
+    /// `encode_sparse_into` with a cache of derived board quantities
+    /// (`EncodeCache`): the same entries, faster over many positions of one
+    /// game.
+    pub fn encode_sparse_cached(&self, s: &State, me: Color, nz: &mut Vec<(u32, f32)>, cache: &mut EncodeCache) -> usize {
+        if nz.len() < self.size {
+            nz.resize(self.size, (0, 0.0));
+        }
+        let mut sink = Sparse { out: &mut nz[..], i: 0, n: 0 };
+        self.write(s, me, &mut sink, Some(cache));
         sink.n
     }
 
     /// Human-readable name of each position, in order.
     pub fn names(&self, s: &State) -> Vec<String> {
         let mut names = Vec::with_capacity(self.size);
-        self.write(s, s.colors[0], &mut Names(&mut names));
+        self.write(s, s.colors[0], &mut Names(&mut names), None);
         names
     }
 
     /// Single definition of the layout, used both for values and names.
-    fn write<W: Sink>(&self, s: &State, me: Color, w: &mut W) {
+    fn write<W: Sink>(&self, s: &State, me: Color, w: &mut W, mut cache: Option<&mut EncodeCache>) {
         let b = &s.board;
         let map = &b.map;
         let n = s.colors.len();
         let rel = |c: Color| relative_seat(s, me, c) as usize;
         let player_at = |r: usize| (r < n).then(|| s.player(absolute_color(s, me, r as u8).unwrap()));
+        // Road distances by seat (`distances`) when no cache is given.
+        let mut local = [[0u8; MAX_NODES]; MAX_PLAYERS];
 
         // Nodes: buildings per relative player, then port access.
         for nd in 0..self.num_land_nodes {
@@ -740,12 +897,12 @@ impl ObservationSpace {
             let my_seat = s.seat(me);
             let deck = s.dice_deck.unwrap_or_else(DiceDeck::full);
             let fair = |t: usize| (6 - (7 - t as i32).unsigned_abs()) as f32 / 36.0;
-            let odds = |seat: usize| match s.dice_deck {
-                Some(d) => d.probabilities(seat, n),
-                None => std::array::from_fn(|t| if (2..=12).contains(&t) { fair(t) } else { 0.0 }),
+            let seats = [my_seat, (my_seat + 1) % n];
+            let odds: [[f32; 13]; 2] = match s.dice_deck {
+                Some(d) => d.probabilities_pair(seats, n),
+                None => [std::array::from_fn(|t| if (2..=12).contains(&t) { fair(t) } else { 0.0 }); 2],
             };
-            for (who, seat) in [("ME", my_seat), ("NEXT", (my_seat + 1) % n)] {
-                let p = odds(seat);
+            for (who, p) in ["ME", "NEXT"].iter().zip(&odds) {
                 for t in 2..=12 {
                     w.put(|| format!("DICE_P_{t}_IF_{who}_ROLLS"), p[t] * 6.0);
                 }
@@ -829,15 +986,18 @@ impl ObservationSpace {
 
         if self.spots {
             const CAP: u8 = 3;
-            let seats: Vec<Color> = (0..n).map(|r| absolute_color(s, me, r as u8).unwrap()).collect();
-            let dists: Vec<[u8; MAX_NODES]> = seats.iter().map(|&c| road_distances(b, c, CAP)).collect();
+            // Relative seat r => color and its road distances.
+            let seats: PerSeat<Color> = (0..n).map(|r| absolute_color(s, me, r as u8).unwrap()).collect();
+            let by_seat = distances(s, CAP, cache.as_deref_mut(), &mut local);
+            let by_rel: [&[u8; MAX_NODES]; MAX_PLAYERS] = std::array::from_fn(|r| &by_seat[if r < n { s.seat(seats[r]) } else { 0 }]);
+            let dists = &by_rel[..n];
             let closeness = |d: u8| (CAP - d) as f32 / CAP as f32;
             let legal = |c: Color, nd: usize| {
                 b.buildable[nd] && (s.is_initial_build_phase || b.in_network(c, nd as NodeId))
             };
+            let all_pips = self.spot_pips(map, b.robber_coordinate);
             for nd in 0..self.num_land_nodes {
-                let mut pips = [0.0f32; 5];
-                add_production(s, nd as NodeId, 6.0, &mut pips);
+                let pips = &all_pips[nd * PIPS..][..PIPS];
                 for (k, &v) in pips.iter().enumerate() {
                     w.put(|| format!("SPOT{nd}_{}_PIPS", RESOURCES[k].name()), v);
                 }
@@ -864,8 +1024,10 @@ impl ObservationSpace {
         }
 
         if self.reach {
-            let seats: Vec<Color> = (0..n).map(|r| absolute_color(s, me, r as u8).unwrap()).collect();
-            let dists: Vec<[u8; MAX_NODES]> = seats.iter().map(|&c| road_distances(b, c, REACH_CAP)).collect();
+            let seats: PerSeat<Color> = (0..n).map(|r| absolute_color(s, me, r as u8).unwrap()).collect();
+            let by_seat = distances(s, REACH_CAP, cache.as_deref_mut(), &mut local);
+            let by_rel: [&[u8; MAX_NODES]; MAX_PLAYERS] = std::array::from_fn(|r| &by_seat[if r < n { s.seat(seats[r]) } else { 0 }]);
+            let dists = &by_rel[..n];
             let pips = |nd: usize| {
                 let mut p = [0.0f32; 5];
                 add_production(s, nd as NodeId, 36.0, &mut p);
@@ -933,10 +1095,14 @@ impl ObservationSpace {
 }
 
 pub fn add_production(s: &State, node: NodeId, weight: f32, prod: &mut [f32; 5]) {
-    let map = &s.board.map;
+    node_pips(&s.board.map, s.board.robber_coordinate, node, weight, prod)
+}
+
+/// `add_production` with the robber at `robber`.
+fn node_pips(map: &CatanMap, robber: Coordinate, node: NodeId, weight: f32, prod: &mut [f32; 5]) {
     for &ti in &map.adjacent_tiles[node as usize] {
         let tile = &map.tiles[ti];
-        if tile.coordinate == s.board.robber_coordinate {
+        if tile.coordinate == robber {
             continue;
         }
         if let (Some(r), Some(num)) = (tile.resource(), tile.number()) {

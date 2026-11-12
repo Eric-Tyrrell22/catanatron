@@ -1,6 +1,6 @@
 """Local viewer for our bots' OpenHex games.
 
-    .venv/bin/python openhex_viewer.py [port] [host]   # then open http://<host>:8765
+    .venv/bin/python openhex_viewer.py [port] [host] [bot,bot]   # then open http://<host>:8765
 
 `host` defaults to 127.0.0.1 (this machine only); 0.0.0.0 serves the local
 network too.
@@ -249,7 +249,8 @@ loadGames().then(tick); setInterval(tick, 3000); setInterval(loadGames, 15000);
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     host = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
-    bots = list(load_keys())
+    # An optional comma-separated bot list (argv[3]) restricts the picker to those bots; default: every bot in the key file.
+    bots = sys.argv[3].split(",") if len(sys.argv) > 3 else list(load_keys())
     feed = Feed(bots)
 
     class Handler(BaseHTTPRequestHandler):
